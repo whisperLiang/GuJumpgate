@@ -235,6 +235,36 @@ test('claim reuse advances aliases up to the configured mailbox limit before cla
   assert.equal(harness.state.currentOutlookEmailPlusClaim.aliasUsed, false);
 });
 
+test('burning a conflicted alias keeps the current claim reusable until the mailbox is exhausted', async () => {
+  const claims = [
+    claimPayload('acct-1', 'first@example.com', 'token-1'),
+    claimPayload('acct-2', 'second@example.com', 'token-2'),
+  ];
+  const harness = createProviderHarness((request) => {
+    const url = new URL(request.url);
+    if (url.pathname === '/api/external/pool/claim-random') {
+      return createJsonResponse(claims.shift());
+    }
+    if (url.pathname === '/api/external/pool/claim-complete') {
+      return createJsonResponse({ success: true, data: { ok: true } });
+    }
+    throw new Error(`Unexpected request: ${url.pathname}`);
+  }, { outlookEmailPlusAliasMaxPerMailbox: 2 });
+
+  const first = await harness.provider.claimOutlookEmailPlusAddress(harness.state, { taskId: 'conflict' });
+  const burnedFirst = await harness.provider.markOutlookEmailPlusAliasUsed(harness.state);
+  const second = await harness.provider.claimOutlookEmailPlusAddress(harness.state, { taskId: 'conflict' });
+  const burnedSecond = await harness.provider.markOutlookEmailPlusAliasUsed(harness.state);
+  await harness.provider.completeOutlookEmailPlusClaim(harness.state, { result: 'user_already_exists' });
+  const third = await harness.provider.claimOutlookEmailPlusAddress(harness.state, { taskId: 'conflict-next' });
+
+  assert.equal(first, 'first+PayPal1@example.com');
+  assert.equal(burnedFirst.exhausted, false);
+  assert.equal(second, 'first+PayPal2@example.com');
+  assert.equal(burnedSecond.exhausted, true);
+  assert.equal(third, 'second+PayPal1@example.com');
+});
+
 test('claim reuse follows the current mailbox alias limit instead of a stale stored claim limit', async () => {
   const harness = createProviderHarness((request) => {
     const url = new URL(request.url);

@@ -418,7 +418,11 @@
     }
 
     async function executeSignupEmailEntry(state) {
-      const resolvedEmail = await resolveSignupEmailForFlow(state);
+      const shouldIgnoreCurrentEmail = !String(state?.registrationEmailState?.current || '').trim()
+        && Boolean(String(state?.registrationEmailState?.previous || '').trim());
+      const resolvedEmail = await resolveSignupEmailForFlow(state, {
+        ignoreCurrentEmail: shouldIgnoreCurrentEmail,
+      });
 
       let signupTabId = await ensureSignupTabForStep2();
 

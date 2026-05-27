@@ -454,6 +454,18 @@ function buildFlowRegistrationEmailStateUpdates(state = {}, options = {}) {
   return buildRegistrationEmailStateUpdates(state, options);
 }
 
+function buildClearedRegistrationEmailStateUpdates(state = {}, options = {}) {
+  if (registrationEmailStateHelpers?.buildClearedRegistrationEmailStateUpdates) {
+    return registrationEmailStateHelpers.buildClearedRegistrationEmailStateUpdates(state, options);
+  }
+  return buildFlowRegistrationEmailStateUpdates(state, {
+    currentEmail: '',
+    preservePrevious: options?.preservePrevious !== false,
+    preserveAccountIdentity: Boolean(options?.preserveAccountIdentity),
+    source: options?.source || '',
+  });
+}
+
 function getPreservedPhoneIdentity(state = {}) {
   if (registrationEmailStateHelpers?.getPreservedPhoneIdentity) {
     return registrationEmailStateHelpers.getPreservedPhoneIdentity(state);
@@ -2995,6 +3007,13 @@ async function markCurrentRegistrationAccountUnavailable(state = {}, options = {
     updated = true;
   }
 
+  const outlookEmailPlusResult = await markCurrentOutlookEmailPlusAliasUsed(latestState, {
+    logPrefix: reasonPrefix,
+    level: options.level || 'warn',
+    result: reasonCode,
+  });
+  updated = Boolean(outlookEmailPlusResult?.handled) || updated;
+
   if (typeof markCurrentCustomEmailPoolEntryUsed === 'function') {
     const result = await markCurrentCustomEmailPoolEntryUsed(latestState, {
       logPrefix: `${reasonPrefix}：自定义邮箱池`,
@@ -3003,7 +3022,63 @@ async function markCurrentRegistrationAccountUnavailable(state = {}, options = {
     updated = Boolean(result?.updated) || updated;
   }
 
+  const cleared = await clearCurrentRegistrationEmailRuntimeState(latestState, {
+    reason: reasonCode,
+    reasonLabel,
+  });
+  updated = Boolean(cleared?.updated) || updated;
+
   return { updated };
+}
+
+async function clearCurrentRegistrationEmailRuntimeState(state = {}, options = {}) {
+  const currentState = await getState();
+  const latestState = {
+    ...(state && typeof state === 'object' ? state : {}),
+    ...(currentState && typeof currentState === 'object' ? currentState : {}),
+  };
+  const currentEmail = String(
+    latestState.email
+    || latestState.registrationEmailState?.current
+    || latestState.step8VerificationTargetEmail
+    || ''
+  ).trim();
+  const normalizedCurrentEmail = currentEmail.toLowerCase();
+  const preserveAccountIdentity = Boolean(getPreservedPhoneIdentity(latestState));
+  const updates = buildClearedRegistrationEmailStateUpdates(latestState, {
+    preservePrevious: true,
+    preserveAccountIdentity,
+    source: `invalidated:${String(options?.reason || '').trim() || 'identity_conflict'}`,
+  });
+
+  if (!preserveAccountIdentity && String(latestState?.accountIdentifierType || '').trim().toLowerCase() === 'email') {
+    updates.accountIdentifierType = null;
+    updates.accountIdentifier = '';
+  }
+
+  updates.lastEmailTimestamp = null;
+  updates.lastSignupCode = null;
+  updates.lastLoginCode = null;
+  updates.signupVerificationRequestedAt = null;
+  updates.loginVerificationRequestedAt = null;
+  updates.step8VerificationTargetEmail = '';
+  if (latestState.bindEmailSubmitted || String(latestState.step8VerificationTargetEmail || '').trim()) {
+    updates.bindEmailSubmitted = false;
+  }
+
+  const normalizedBoundEmail = String(latestState?.boundEmail || '').trim().toLowerCase();
+  if (normalizedCurrentEmail && normalizedBoundEmail === normalizedCurrentEmail) {
+    updates.boundEmail = '';
+    updates.bindEmailSubmitted = false;
+  }
+
+  if (!statePatchHasChanges(latestState, updates)) {
+    return { updated: false };
+  }
+
+  await setState(updates);
+  broadcastDataUpdate(updates);
+  return { updated: true, updates };
 }
 
 function getCustomEmailPoolEmailForRun(state = {}, targetRun = 1) {
@@ -5638,6 +5713,13 @@ async function finalizeOutlookEmailPlusClaimForAccountRunRecord(status, state = 
   const action = getOutlookEmailPlusLifecycleAction(status);
   if (!action || !hasCurrentOutlookEmailPlusClaim(state)) {
     return { handled: false };
+  }
+  if (action === 'release' && isRegistrationIdentityConflictFailure(reason)) {
+    const conflictResult = isStep8EmailInUseFailure(reason) ? 'email_in_use' : 'user_already_exists';
+    return markCurrentOutlookEmailPlusAliasUsed(state, {
+      logPrefix: '流程失败',
+      result: conflictResult,
+    });
   }
   if (action === 'complete') {
     return markCurrentOutlookEmailPlusAliasUsed(state, {
