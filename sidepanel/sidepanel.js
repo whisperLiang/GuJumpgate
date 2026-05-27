@@ -5849,6 +5849,82 @@ function collectHeroSmsPriceEntriesForPreview(payload, entries = []) {
   return entries;
 }
 
+function collectPriceEntries(payload, entries = []) {
+  if (Array.isArray(payload)) {
+    payload.forEach((entry) => collectPriceEntries(entry, entries));
+    return entries;
+  }
+  if (!payload || typeof payload !== 'object') {
+    return entries;
+  }
+
+  const normalizeCount = (...values) => {
+    const counts = values
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value));
+    if (!counts.length) {
+      return null;
+    }
+    return Math.max(0, Math.floor(Math.max(...counts)));
+  };
+
+  const directCost = normalizeHeroSmsPriceForPreview(payload.cost ?? payload.price ?? payload.Price);
+  if (directCost !== null) {
+    entries.push({
+      cost: directCost,
+      count: normalizeCount(
+        payload.count,
+        payload.qty,
+        payload.Qty,
+        payload.stock,
+        payload.available,
+        payload.quantity,
+        payload.left,
+        payload.free
+      ),
+    });
+  }
+
+  Object.entries(payload).forEach(([key, value]) => {
+    const keyedPrice = normalizeHeroSmsPriceForPreview(key);
+    if (keyedPrice === null) {
+      return;
+    }
+    const trimmedKey = String(key || '').trim();
+    const looksLikeDecimalPriceKey = /^-?\d+[.,]\d+$/.test(trimmedKey)
+      || /^[^\d-]*-?\d+[.,]\d+[^\d]*$/.test(trimmedKey);
+    if (!looksLikeDecimalPriceKey && value && typeof value === 'object') {
+      return;
+    }
+    if (value && typeof value === 'object') {
+      entries.push({
+        cost: keyedPrice,
+        count: normalizeCount(
+          value.count,
+          value.qty,
+          value.Qty,
+          value.stock,
+          value.available,
+          value.quantity,
+          value.left,
+          value.free
+        ),
+      });
+      return;
+    }
+    const numericCount = Number(value);
+    if (Number.isFinite(numericCount)) {
+      entries.push({
+        cost: keyedPrice,
+        count: Math.max(0, Math.floor(numericCount)),
+      });
+    }
+  });
+
+  Object.values(payload).forEach((entry) => collectPriceEntries(entry, entries));
+  return entries;
+}
+
 function collectHeroSmsPriceEntriesFromTopCountriesPayload(payload, countryId, entries = []) {
   const normalizedCountryId = normalizeHeroSmsCountryId(countryId, 0);
   if (normalizedCountryId <= 0) {
