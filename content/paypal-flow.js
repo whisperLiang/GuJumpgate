@@ -853,6 +853,34 @@ async function clickHostedReviewConsent() {
   throw new Error('PayPal hosted checkout 账单确认页超时，未检测到目标文案。');
 }
 
+async function clickHostedApprovalButton() {
+  const delayOperation = typeof performPayPalOperationWithDelay === 'function'
+    ? performPayPalOperationWithDelay
+    : async (metadata, operation) => {
+        const rootScope = typeof window !== 'undefined' ? window : globalThis;
+        const gate = rootScope?.CodexOperationDelay?.performOperationWithDelay;
+        return typeof gate === 'function' ? gate(metadata, operation) : operation();
+      };
+  await waitForDocumentComplete();
+  const button = await waitUntil(() => {
+    const candidate = findApproveButton();
+    return candidate && isVisibleElement(candidate) && isEnabledControl(candidate) ? candidate : null;
+  }, {
+    intervalMs: 250,
+    timeoutMs: 10000,
+    timeoutMessage: 'PayPal hosted checkout 确认页未找到可点击的同意/继续按钮。',
+  });
+  const buttonText = getActionText(button);
+  await delayOperation({ stepKey: 'plus-checkout-create', kind: 'click', label: 'hosted-paypal-approval' }, async () => {
+    simulateClick(button);
+  });
+  return {
+    stage: PAYPAL_HOSTED_STAGE_APPROVAL,
+    clicked: true,
+    buttonText,
+  };
+}
+
 async function runHostedCheckoutStep(payload = {}) {
   const stage = detectPayPalHostedCheckoutStage();
   if (payload.resendVerificationCode && stage !== PAYPAL_HOSTED_STAGE_VERIFICATION) {
@@ -888,6 +916,9 @@ async function runHostedCheckoutStep(payload = {}) {
   }
   if (stage === PAYPAL_HOSTED_STAGE_REVIEW) {
     return clickHostedReviewConsent();
+  }
+  if (stage === PAYPAL_HOSTED_STAGE_APPROVAL) {
+    return clickHostedApprovalButton();
   }
   return {
     stage,

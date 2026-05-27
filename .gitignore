@@ -2,6 +2,7 @@
 
 /_metadata/
 .vscode
+.cli-proxy-api/
 
 /data/account-run-history.txt
 /data/account-run-history.json
@@ -17,3 +18,4 @@ __pycache__/
 /release-artifacts/
 # Local exported runtime settings
 /config.json
+/multipage-settings-*.json

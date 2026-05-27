@@ -11,6 +11,7 @@
   const DEFAULT_REQUEST_TIMEOUT_MS = 20000;
   const DEFAULT_LANG = '';
   const DEFAULT_PRICES_ACTION = 'getPricesV3';
+  const DEFAULT_MAX_USES = 3;
 
   function normalizeSmsBowerCountryId(value, fallback = DEFAULT_COUNTRY_ID) {
     const parsed = Math.floor(Number(value));
@@ -59,6 +60,16 @@
     const numeric = Number(rawValue);
     if (!Number.isFinite(numeric) || numeric <= 0) return '';
     return String(Math.round(numeric * 10000) / 10000);
+  }
+
+  function normalizeSmsBowerCanGetAnotherSms(value, fallback = null) {
+    const source = value !== undefined && value !== null ? value : fallback;
+    if (source === undefined || source === null || source === '') return null;
+    if (typeof source === 'boolean') return source;
+    const normalized = String(source || '').trim().toLowerCase();
+    if (['1', 'true', 'yes', 'y'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'n'].includes(normalized)) return false;
+    return null;
   }
 
   function normalizeSmsBowerServiceCode(value = '', fallback = DEFAULT_SERVICE_CODE) {
@@ -230,6 +241,10 @@
     }
 
     if (!activationId || !phoneNumber) return null;
+    const canGetAnotherSms = normalizeSmsBowerCanGetAnotherSms(record?.canGetAnotherSms, fallback.canGetAnotherSms);
+    const maxUses = canGetAnotherSms === false
+      ? 1
+      : Math.max(1, Math.floor(Number(record?.maxUses ?? fallback.maxUses) || DEFAULT_MAX_USES));
     return {
       activationId,
       phoneNumber,
@@ -238,7 +253,8 @@
       countryId: normalizeSmsBowerCountryId(fallback.countryId ?? fallback.id, DEFAULT_COUNTRY_ID),
       countryLabel: normalizeSmsBowerCountryLabel(fallback.countryLabel || fallback.label, DEFAULT_COUNTRY_LABEL),
       successfulUses: Math.max(0, Math.floor(Number(record?.successfulUses) || 0)),
-      maxUses: 1,
+      maxUses,
+      ...(canGetAnotherSms !== null ? { canGetAnotherSms } : {}),
       ...(activationCost !== undefined ? { price: Number(activationCost) } : {}),
     };
   }
@@ -330,6 +346,44 @@
 
   async function requestAdditionalSms(state = {}, activation, deps = {}) {
     return setActivationStatus(state, activation, 3, deps);
+  }
+
+  async function reuseActivation(state = {}, activation, deps = {}) {
+    const normalizedActivation = normalizeActivation(activation, activation);
+    if (!normalizedActivation) {
+      throw new Error('Missing reusable SMSBower activation.');
+    }
+    if (normalizedActivation.canGetAnotherSms === false) {
+      throw new Error('SMSBower activation does not support another SMS.');
+    }
+
+    const payload = await fetchPayload(resolveConfig(state, deps), {
+      action: 'getStatus',
+      id: normalizedActivation.activationId,
+    }, 'SMSBower getStatus');
+    const statusText = describePayload(payload);
+
+    if (/^STATUS_(WAIT_CODE|WAIT_RETRY|WAIT_RESEND)(?::.+)?$/i.test(statusText)) {
+      return {
+        ...normalizedActivation,
+        source: normalizedActivation.source || 'smsbower-reuse',
+      };
+    }
+
+    if (/^STATUS_OK(?::.+)?$/i.test(statusText)) {
+      await requestAdditionalSms(state, normalizedActivation, deps);
+      return {
+        ...normalizedActivation,
+        source: normalizedActivation.source || 'smsbower-reuse',
+        reusePreparedAt: Date.now(),
+      };
+    }
+
+    if (/^STATUS_CANCEL$/i.test(statusText)) {
+      throw new Error('SMSBower reuse failed: activation was canceled.');
+    }
+
+    throw new Error(`SMSBower reuse failed: ${statusText || 'empty response'}`);
   }
 
   function extractVerificationCode(rawCodeOrText) {
@@ -471,6 +525,7 @@
       finishActivation: (state, activation) => finishActivation(state, activation, providerDeps),
       cancelActivation: (state, activation) => cancelActivation(state, activation, providerDeps),
       banActivation: (state, activation) => cancelActivation(state, activation, providerDeps),
+      reuseActivation: (state, activation) => reuseActivation(state, activation, providerDeps),
       requestAdditionalSms: (state, activation) => requestAdditionalSms(state, activation, providerDeps),
       pollActivationCode: (state, activation, options) => pollActivationCode(state, activation, options, providerDeps),
       fetchBalance: (state) => fetchBalance(state, providerDeps),
@@ -494,6 +549,7 @@
     normalizeSmsBowerCountryLabel,
     normalizeSmsBowerPrice,
     normalizeSmsBowerServiceCode,
+    normalizeSmsBowerCanGetAnotherSms,
     normalizeSmsBowerLang,
     normalizeSmsBowerPricesAction,
   };

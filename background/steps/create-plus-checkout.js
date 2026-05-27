@@ -2587,6 +2587,7 @@ function FindProxyForURL(url, host) {
       let hostedVerificationLastSubmittedAt = 0;
       let hostedGuestCardErrorRetries = 0;
       let hostedGuestCardErrorRetrySettlingUntil = 0;
+      let hostedApprovalClickAttempts = 0;
       const hostedVerificationAttemptedCodes = new Set();
       while (Date.now() - startedAt < HOSTED_CHECKOUT_PAYPAL_LOOP_TIMEOUT_MS) {
         throwIfStopped();
@@ -2858,7 +2859,21 @@ function FindProxyForURL(url, host) {
         }
 
         if (pageState.hostedStage === 'approval') {
-          throw new Error('步骤 6：hosted checkout 流程意外进入了普通 PayPal 授权页，当前流程未配置 PayPal 账号授权。');
+          if (hostedApprovalClickAttempts >= 3) {
+            throw new Error('步骤 6：PayPal hosted checkout 确认页连续点击后仍未跳转，请检查当前 PayPal 页面状态。');
+          }
+          hostedApprovalClickAttempts += 1;
+          hostedVerificationSubmitted = false;
+          loggedWaitingForHostedVerificationResult = false;
+          await addLog(
+            `步骤 6：检测到 PayPal hosted checkout 确认/授权页，正在点击“${pageState.approveButtonText || '同意并继续'}”（${hostedApprovalClickAttempts}/3）...`,
+            'info'
+          );
+          await runHostedCheckoutPayPalStep(tabId, {
+            ...guestProfile,
+          });
+          await sleepWithStop(2000);
+          continue;
         }
 
         await sleepWithStop(1000);

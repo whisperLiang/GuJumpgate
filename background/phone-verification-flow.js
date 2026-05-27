@@ -1254,6 +1254,25 @@
       return normalizePhoneSmsReuseEnabled(state);
     }
 
+    function supportsReusableActivationProvider(provider) {
+      const normalizedProvider = normalizePhoneSmsProvider(provider);
+      return normalizedProvider === PHONE_SMS_PROVIDER_HERO
+        || normalizedProvider === PHONE_SMS_PROVIDER_5SIM
+        || normalizedProvider === PHONE_SMS_PROVIDER_SMSBOWER;
+    }
+
+    function shouldPrepareSmsBowerActivationForReuse(state = {}, activation) {
+      const normalizedActivation = normalizeActivation(activation);
+      return Boolean(
+        normalizedActivation
+        && normalizedActivation.provider === PHONE_SMS_PROVIDER_SMSBOWER
+        && !isPhoneSignupIdentityState(state)
+        && isPhoneSmsReuseEnabled(state)
+        && normalizedActivation.canGetAnotherSms !== false
+        && normalizeUseCount(normalizedActivation.successfulUses) + 1 < normalizedActivation.maxUses
+      );
+    }
+
     function createResolvedFiveSimProvider() {
       const rootScope = typeof self !== 'undefined' ? self : globalThis;
       const factory = createFiveSimProvider || rootScope.PhoneSmsFiveSimProvider?.createProvider;
@@ -1582,6 +1601,23 @@
             ? normalizeNexSmsCountryId(rawCountryId, 0)
             : normalizeCountryId(rawCountryId, fallbackCountryId)
         );
+      const canGetAnotherSms = (() => {
+        if (!Object.prototype.hasOwnProperty.call(record, 'canGetAnotherSms')) {
+          return null;
+        }
+        if (typeof record.canGetAnotherSms === 'boolean') {
+          return record.canGetAnotherSms;
+        }
+        const normalized = String(record.canGetAnotherSms || '').trim().toLowerCase();
+        if (['1', 'true', 'yes', 'y'].includes(normalized)) {
+          return true;
+        }
+        if (['0', 'false', 'no', 'n'].includes(normalized)) {
+          return false;
+        }
+        return null;
+      })();
+      const reusePreparedAt = normalizeTimestampMs(record.reusePreparedAt);
       return {
         activationId,
         phoneNumber,
@@ -1594,6 +1630,8 @@
         maxUses: Math.max(1, Math.floor(Number(record.maxUses) || DEFAULT_PHONE_NUMBER_MAX_USES)),
         ...(expiresAt > 0 ? { expiresAt } : {}),
         ...(statusAction ? { statusAction } : {}),
+        ...(canGetAnotherSms !== null ? { canGetAnotherSms } : {}),
+        ...(reusePreparedAt > 0 ? { reusePreparedAt } : {}),
         ...(record.source ? { source: String(record.source || '').trim() } : {}),
         ...(record.phoneCodeReceived ? { phoneCodeReceived: true } : {}),
         ...(record.phoneCodeReceivedAt ? { phoneCodeReceivedAt: Math.max(0, Number(record.phoneCodeReceivedAt) || 0) } : {}),
@@ -4277,6 +4315,18 @@
           return provider.reuseActivation(state, normalizedActivation);
         }
       }
+      if (getActivationProviderId(normalizedActivation, state) === PHONE_SMS_PROVIDER_SMSBOWER) {
+        const provider = getSmsBowerProviderForState(state);
+        if (provider?.reuseActivation) {
+          return provider.reuseActivation(state, normalizedActivation);
+        }
+        await setPhoneActivationStatus(state, normalizedActivation, 3, 'SMSBower setStatus(3)');
+        return {
+          ...normalizedActivation,
+          source: normalizedActivation.source || 'smsbower-reuse',
+          reusePreparedAt: Date.now(),
+        };
+      }
 
       const config = resolvePhoneConfig(state);
       if (config.provider === PHONE_SMS_PROVIDER_5SIM) {
@@ -4302,6 +4352,14 @@
       }
       if (config.provider === PHONE_SMS_PROVIDER_NEXSMS) {
         throw new Error('NexSMS 当前流程不支持复用手机号订单。');
+      }
+      if (config.provider === PHONE_SMS_PROVIDER_SMSBOWER) {
+        await setPhoneActivationStatus(state, normalizedActivation, 3, 'SMSBower setStatus(3)');
+        return {
+          ...normalizedActivation,
+          source: normalizedActivation.source || 'smsbower-reuse',
+          reusePreparedAt: Date.now(),
+        };
       }
       const payload = await fetchHeroSmsPayload(config, {
         action: 'reactivate',
@@ -4593,7 +4651,10 @@
           const provider = getSmsBowerProviderForState(state);
           if (provider?.requestAdditionalSms) {
             await provider.requestAdditionalSms(state, activation);
+            return;
           }
+          await setPhoneActivationStatus(state, activation, 3, 'SMSBower setStatus(3)');
+          return;
         }
         if (getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_SMS_VERIFICATION_NUMBER) {
           const provider = getSmsVerificationNumberProviderForState(state);
@@ -4623,6 +4684,27 @@
         await setPhoneActivationStatus(state, activation, 3, 'HeroSMS setStatus(3)');
       } catch (_) {
         // Best-effort request only.
+      }
+    }
+
+    async function prepareProviderActivationForReuseAfterSuccess(state = {}, activation) {
+      const normalizedActivation = normalizeActivation(activation);
+      if (!shouldPrepareSmsBowerActivationForReuse(state, normalizedActivation)) {
+        return null;
+      }
+      try {
+        await requestAdditionalPhoneSms(state, normalizedActivation);
+        return {
+          ...normalizedActivation,
+          source: normalizedActivation.source || 'smsbower-reuse',
+          reusePreparedAt: Date.now(),
+        };
+      } catch (error) {
+        await addLog(
+          `SMSBower reuse prepare failed for ${normalizedActivation.phoneNumber}: ${error?.message || error}`,
+          'warn'
+        );
+        return null;
       }
     }
 
@@ -5661,7 +5743,7 @@
         canUseSavedActivationForCurrentFlow
         && !Boolean(options?.skipPreferredActivation)
         && preferredActivation
-        && (provider === PHONE_SMS_PROVIDER_HERO || provider === PHONE_SMS_PROVIDER_5SIM)
+        && supportsReusableActivationProvider(provider)
         && preferredActivation.provider === provider
         && !blockedCountryIds.has(normalizeCountryKey(preferredActivation.countryId))
         && allowedCountryIds.has(normalizeCountryKey(preferredActivation.countryId))
@@ -5705,7 +5787,7 @@
       pushReusableCandidate(reusableActivation);
       reusableActivationPool.forEach((candidate) => pushReusableCandidate(candidate));
 
-      if (reuseEnabled && (provider === PHONE_SMS_PROVIDER_HERO || provider === PHONE_SMS_PROVIDER_5SIM)) {
+      if (reuseEnabled && supportsReusableActivationProvider(provider)) {
         for (const candidateActivation of reusableCandidates) {
           if (candidateActivation.provider !== provider) {
             continue;
@@ -5853,7 +5935,8 @@
       }
       const reusableProvider = normalizedActivation.provider;
       const canPersistReusableActivation = reusableProvider === PHONE_SMS_PROVIDER_HERO
-        || reusableProvider === PHONE_SMS_PROVIDER_5SIM;
+        || reusableProvider === PHONE_SMS_PROVIDER_5SIM
+        || reusableProvider === PHONE_SMS_PROVIDER_SMSBOWER;
       if (!canPersistReusableActivation) {
         await clearReusableActivation();
         return;
@@ -7518,18 +7601,29 @@
             }
 
             const latestSuccessState = await getState();
+            const providerReuseActivation = shouldSkipTerminalStatusForFreeReuse(latestSuccessState, activation)
+              ? null
+              : await prepareProviderActivationForReuseAfterSuccess(latestSuccessState, activation);
+            if (providerReuseActivation) {
+              activation = providerReuseActivation;
+            }
             if (shouldSkipTerminalStatusForFreeReuse(latestSuccessState, activation)) {
               await addLog(
                 `步骤 9：已跳过 HeroSMS 完成状态，保留 ${activation.phoneNumber} 供白嫖复用。`,
                 'info'
               );
               await markFreeReusableActivationAfterInitialSuccess(latestSuccessState, activation);
+            } else if (providerReuseActivation) {
+              await addLog(
+                `SMSBower reuse: kept ${activation.phoneNumber} waiting for another SMS.`,
+                'info'
+              );
             } else {
               await completePhoneActivation(latestSuccessState, activation);
             }
             await markFreeReusableActivationAfterAutoSuccess(state, activation);
             if (!isFreeAutoReuseActivation(activation)) {
-              await markActivationReusableAfterSuccess(state, activation);
+              await markActivationReusableAfterSuccess(latestSuccessState, activation);
             }
             clearCountrySmsFailure(activation.countryId, activation.provider);
             shouldCancelActivation = false;
