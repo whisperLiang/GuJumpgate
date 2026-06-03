@@ -1258,19 +1258,70 @@
       const normalizedProvider = normalizePhoneSmsProvider(provider);
       return normalizedProvider === PHONE_SMS_PROVIDER_HERO
         || normalizedProvider === PHONE_SMS_PROVIDER_5SIM
-        || normalizedProvider === PHONE_SMS_PROVIDER_SMSBOWER;
+        || isSmsBowerCompatibleReusableProvider(normalizedProvider);
+    }
+
+    function isSmsBowerCompatibleReusableProvider(provider) {
+      const normalizedProvider = normalizePhoneSmsProvider(provider);
+      return normalizedProvider === PHONE_SMS_PROVIDER_SMSBOWER
+        || normalizedProvider === PHONE_SMS_PROVIDER_SMS_VERIFICATION_NUMBER
+        || normalizedProvider === PHONE_SMS_PROVIDER_GRIZZLYSMS
+        || normalizedProvider === PHONE_SMS_PROVIDER_SMSPOOL;
     }
 
     function shouldPrepareSmsBowerActivationForReuse(state = {}, activation) {
       const normalizedActivation = normalizeActivation(activation);
+      const smsBowerMaxUses = Math.max(
+        normalizedActivation?.maxUses || 0,
+        DEFAULT_PHONE_NUMBER_MAX_USES
+      );
       return Boolean(
         normalizedActivation
-        && normalizedActivation.provider === PHONE_SMS_PROVIDER_SMSBOWER
+        && isSmsBowerCompatibleReusableProvider(normalizedActivation.provider)
         && !isPhoneSignupIdentityState(state)
         && isPhoneSmsReuseEnabled(state)
-        && normalizedActivation.canGetAnotherSms !== false
-        && normalizeUseCount(normalizedActivation.successfulUses) + 1 < normalizedActivation.maxUses
+        && normalizeUseCount(normalizedActivation.successfulUses) + 1 < smsBowerMaxUses
       );
+    }
+
+    function getSmsBowerReuseSkipReason(state = {}, activation) {
+      const normalizedActivation = normalizeActivation(activation);
+      if (!normalizedActivation || !isSmsBowerCompatibleReusableProvider(normalizedActivation.provider)) {
+        return '';
+      }
+      if (isPhoneSignupIdentityState(state)) {
+        return 'current flow is phone-signup identity';
+      }
+      if (!isPhoneSmsReuseEnabled(state)) {
+        return 'phone SMS reuse is disabled';
+      }
+      const smsBowerMaxUses = Math.max(
+        normalizedActivation.maxUses || 0,
+        DEFAULT_PHONE_NUMBER_MAX_USES
+      );
+      const nextUse = normalizeUseCount(normalizedActivation.successfulUses) + 1;
+      if (nextUse >= smsBowerMaxUses) {
+        return `reuse limit reached after current use (${nextUse}/${smsBowerMaxUses})`;
+      }
+      return '';
+    }
+
+    function isSmsBowerProviderReuseActivation(activation) {
+      const normalizedActivation = normalizeActivation(activation);
+      return Boolean(
+        normalizedActivation
+        && isSmsBowerCompatibleReusableProvider(normalizedActivation.provider)
+        && (
+          String(normalizedActivation.source || '').trim().toLowerCase() === 'smsbower-reuse'
+          || String(normalizedActivation.source || '').trim().toLowerCase().endsWith('-reuse')
+          || normalizedActivation.reusePreparedAt > 0
+          || normalizeUseCount(normalizedActivation.successfulUses) > 0
+        )
+      );
+    }
+
+    function isSmsBowerStaleRetryStatus(statusText = '') {
+      return /^STATUS_(WAIT_RETRY|WAIT_RESEND):.+$/i.test(String(statusText || '').trim());
     }
 
     function createResolvedFiveSimProvider() {
@@ -1324,6 +1375,7 @@
         requestTimeoutMs: DEFAULT_PHONE_REQUEST_TIMEOUT_MS,
         sleepWithStop,
         throwIfStopped,
+        rememberActivationAcquiredPrice,
       });
     }
 
@@ -1635,6 +1687,7 @@
         ...(record.source ? { source: String(record.source || '').trim() } : {}),
         ...(record.phoneCodeReceived ? { phoneCodeReceived: true } : {}),
         ...(record.phoneCodeReceivedAt ? { phoneCodeReceivedAt: Math.max(0, Number(record.phoneCodeReceivedAt) || 0) } : {}),
+        ...(record.lastPhoneCode ? { lastPhoneCode: String(record.lastPhoneCode || '').trim() } : {}),
       };
     }
 
@@ -1688,15 +1741,17 @@
       };
     }
 
-    function markActivationPhoneCodeReceived(activation) {
+    function markActivationPhoneCodeReceived(activation, code = '') {
       const normalizedActivation = normalizeActivation(activation);
       if (!normalizedActivation) {
         return null;
       }
+      const lastPhoneCode = String(code || '').trim();
       return {
         ...normalizedActivation,
         phoneCodeReceived: true,
         phoneCodeReceivedAt: normalizedActivation.phoneCodeReceivedAt || Date.now(),
+        ...(lastPhoneCode ? { lastPhoneCode } : {}),
       };
     }
 
@@ -3923,6 +3978,71 @@
     }
 
     async function requestPhoneActivation(state = {}, options = {}) {
+      const selectedProvider = normalizePhoneSmsProvider(state?.phoneSmsProvider);
+      if (isSmsBowerCompatibleReusableProvider(selectedProvider) && isPhoneSmsReuseEnabled(state)) {
+        const countryCandidates = resolveCountryCandidatesForProvider(state, selectedProvider);
+        const normalizeCountryKeyForReuse = (value) => String(normalizeCountryId(value, 0));
+        const blockedCountryIds = new Set(
+          (Array.isArray(options?.blockedCountryIds) ? options.blockedCountryIds : [])
+            .map((value) => normalizeCountryKeyForReuse(value))
+            .filter((id) => Boolean(id && id !== '0'))
+        );
+        const allowedCountryIds = new Set(
+          countryCandidates
+            .map((entry) => normalizeCountryKeyForReuse(entry.id || entry.code))
+            .filter((id) => Boolean(id && id !== '0' && !blockedCountryIds.has(id)))
+        );
+        const reusableActivation = normalizeActivation(state[REUSABLE_PHONE_ACTIVATION_STATE_KEY]);
+        const reusableActivationPool = readReusableActivationPoolFromState(state);
+        const reusableCandidates = [];
+        const seenReusableKeys = new Set();
+        const pushReusableCandidate = (candidate) => {
+          const normalizedCandidate = normalizeActivation(candidate);
+          if (!normalizedCandidate) {
+            return;
+          }
+          const candidateKey = buildActivationIdentityKey(normalizedCandidate);
+          if (!candidateKey || seenReusableKeys.has(candidateKey)) {
+            return;
+          }
+          seenReusableKeys.add(candidateKey);
+          reusableCandidates.push(normalizedCandidate);
+        };
+        pushReusableCandidate(reusableActivation);
+        reusableActivationPool.forEach((candidate) => pushReusableCandidate(candidate));
+
+        for (const candidateActivation of reusableCandidates) {
+          if (candidateActivation.provider !== selectedProvider) {
+            continue;
+          }
+          if (candidateActivation.successfulUses >= candidateActivation.maxUses) {
+            continue;
+          }
+          const candidateCountryKey = normalizeCountryKeyForReuse(candidateActivation.countryId);
+          if (blockedCountryIds.has(candidateCountryKey)) {
+            continue;
+          }
+          if (allowedCountryIds.size && !allowedCountryIds.has(candidateCountryKey)) {
+            continue;
+          }
+          try {
+            const reactivated = await reactivatePhoneActivation(state, candidateActivation);
+            await addLog(
+              `姝ラ 9锛氬鐢?${getPhoneSmsProviderLabel(selectedProvider)} 鍙风爜 ${reactivated.phoneNumber}锛堢 ${reactivated.successfulUses + 1}/${reactivated.maxUses} 娆★級銆俙,
+              `,
+              'info'
+            );
+            await resetPhoneNoSupplyFailureStreak(state);
+            return reactivated;
+          } catch (error) {
+            await addLog(`姝ラ 9锛氬鐢ㄥ彿鐮?${candidateActivation.phoneNumber} 澶辫触锛屽皢鏀逛负鑾峰彇鏂板彿鐮併€?{error.message}`, 'warn');
+            await removeReusableActivationFromPool(candidateActivation, { state }).catch(() => {});
+            if (isSameActivation(reusableActivation, candidateActivation)) {
+              await clearReusableActivation();
+            }
+          }
+        }
+      }
       if (normalizePhoneSmsProvider(state?.phoneSmsProvider) === PHONE_SMS_PROVIDER_FIVE_SIM) {
         const provider = getFiveSimProviderForState(state);
         if (provider) {
@@ -4315,6 +4435,24 @@
           return provider.reuseActivation(state, normalizedActivation);
         }
       }
+      if (getActivationProviderId(normalizedActivation, state) === PHONE_SMS_PROVIDER_SMS_VERIFICATION_NUMBER) {
+        const provider = getSmsVerificationNumberProviderForState(state);
+        if (provider?.reuseActivation) {
+          return provider.reuseActivation(state, normalizedActivation);
+        }
+      }
+      if (getActivationProviderId(normalizedActivation, state) === PHONE_SMS_PROVIDER_GRIZZLYSMS) {
+        const provider = getGrizzlySmsProviderForState(state);
+        if (provider?.reuseActivation) {
+          return provider.reuseActivation(state, normalizedActivation);
+        }
+      }
+      if (getActivationProviderId(normalizedActivation, state) === PHONE_SMS_PROVIDER_SMSPOOL) {
+        const provider = getSmsPoolProviderForState(state);
+        if (provider?.reuseActivation) {
+          return provider.reuseActivation(state, normalizedActivation);
+        }
+      }
       if (getActivationProviderId(normalizedActivation, state) === PHONE_SMS_PROVIDER_SMSBOWER) {
         const provider = getSmsBowerProviderForState(state);
         if (provider?.reuseActivation) {
@@ -4327,7 +4465,6 @@
           reusePreparedAt: Date.now(),
         };
       }
-
       const config = resolvePhoneConfig(state);
       if (config.provider === PHONE_SMS_PROVIDER_5SIM) {
         const reuseProduct = normalizeFiveSimCountryCode(
@@ -4646,29 +4783,30 @@
 
     async function requestAdditionalPhoneSms(state = {}, activation) {
       const config = resolvePhoneConfig(state);
-      if (config.provider !== PHONE_SMS_PROVIDER_HERO) {
-        if (getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_SMSBOWER) {
-          const provider = getSmsBowerProviderForState(state);
-          if (provider?.requestAdditionalSms) {
-            await provider.requestAdditionalSms(state, activation);
-            return;
-          }
-          await setPhoneActivationStatus(state, activation, 3, 'SMSBower setStatus(3)');
+      const activationProvider = getActivationProviderId(activation, state);
+      if (activationProvider === PHONE_SMS_PROVIDER_SMSBOWER) {
+        const provider = getSmsBowerProviderForState(state);
+        if (provider?.requestAdditionalSms) {
+          await provider.requestAdditionalSms(state, activation);
           return;
         }
-        if (getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_SMS_VERIFICATION_NUMBER) {
+        await setPhoneActivationStatus(state, activation, 3, 'SMSBower setStatus(3)');
+        return;
+      }
+      if (config.provider !== PHONE_SMS_PROVIDER_HERO) {
+        if (activationProvider === PHONE_SMS_PROVIDER_SMS_VERIFICATION_NUMBER) {
           const provider = getSmsVerificationNumberProviderForState(state);
           if (provider?.requestAdditionalSms) {
             await provider.requestAdditionalSms(state, activation);
           }
         }
-        if (getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_GRIZZLYSMS) {
+        if (activationProvider === PHONE_SMS_PROVIDER_GRIZZLYSMS) {
           const provider = getGrizzlySmsProviderForState(state);
           if (provider?.requestAdditionalSms) {
             await provider.requestAdditionalSms(state, activation);
           }
         }
-        if (getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_CHATGPT_API) {
+        if (activationProvider === PHONE_SMS_PROVIDER_CHATGPT_API) {
           const provider = getChatGptApiProviderForState(state);
           if (provider?.requestAdditionalSms) {
             await provider.requestAdditionalSms(state, activation);
@@ -4677,7 +4815,7 @@
         return;
       }
       try {
-        if (getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_FIVE_SIM) {
+        if (activationProvider === PHONE_SMS_PROVIDER_FIVE_SIM) {
           // 5sim does not expose a HeroSMS-style setStatus(3) resend primitive.
           return;
         }
@@ -4689,23 +4827,28 @@
 
     async function prepareProviderActivationForReuseAfterSuccess(state = {}, activation) {
       const normalizedActivation = normalizeActivation(activation);
-      if (!shouldPrepareSmsBowerActivationForReuse(state, normalizedActivation)) {
-        return null;
-      }
-      try {
-        await requestAdditionalPhoneSms(state, normalizedActivation);
-        return {
-          ...normalizedActivation,
-          source: normalizedActivation.source || 'smsbower-reuse',
-          reusePreparedAt: Date.now(),
-        };
-      } catch (error) {
+      const smsBowerReuseSkipReason = getSmsBowerReuseSkipReason(state, normalizedActivation);
+      if (smsBowerReuseSkipReason) {
+        const providerLabel = getPhoneSmsProviderLabel(normalizedActivation.provider);
         await addLog(
-          `SMSBower reuse prepare failed for ${normalizedActivation.phoneNumber}: ${error?.message || error}`,
-          'warn'
+          `${providerLabel} reuse: not preserving ${normalizedActivation.phoneNumber}; ${smsBowerReuseSkipReason}.`,
+          'info'
         );
         return null;
       }
+      if (!shouldPrepareSmsBowerActivationForReuse(state, normalizedActivation)) {
+        return null;
+      }
+      const smsBowerMaxUses = Math.max(
+        normalizedActivation.maxUses || 0,
+        DEFAULT_PHONE_NUMBER_MAX_USES
+      );
+      return {
+        ...normalizedActivation,
+        canGetAnotherSms: true,
+        maxUses: smsBowerMaxUses,
+        source: normalizedActivation.source || `${normalizePhoneSmsProvider(normalizedActivation.provider)}-reuse`,
+      };
     }
 
     function isHeroSmsWaitingStatusText(text) {
@@ -5936,7 +6079,7 @@
       const reusableProvider = normalizedActivation.provider;
       const canPersistReusableActivation = reusableProvider === PHONE_SMS_PROVIDER_HERO
         || reusableProvider === PHONE_SMS_PROVIDER_5SIM
-        || reusableProvider === PHONE_SMS_PROVIDER_SMSBOWER;
+        || isSmsBowerCompatibleReusableProvider(reusableProvider);
       if (!canPersistReusableActivation) {
         await clearReusableActivation();
         return;
@@ -5955,12 +6098,26 @@
         return;
       }
       if (successfulUses >= normalizedActivation.maxUses) {
+        if (isSmsBowerCompatibleReusableProvider(reusableProvider)) {
+          const providerLabel = getPhoneSmsProviderLabel(reusableProvider);
+          await addLog(
+            `${providerLabel} reuse: ${normalizedActivation.phoneNumber} reached ${successfulUses}/${normalizedActivation.maxUses}; not saving for another use.`,
+            'info'
+          );
+        }
         await clearReusableActivation();
         await removeReusableActivationFromPool(nextReusableActivation, { state });
         return;
       }
 
       await persistReusableActivation(nextReusableActivation);
+      if (isSmsBowerCompatibleReusableProvider(reusableProvider)) {
+        const providerLabel = getPhoneSmsProviderLabel(reusableProvider);
+        await addLog(
+          `${providerLabel} reuse: saved ${nextReusableActivation.phoneNumber} for future use (${successfulUses}/${nextReusableActivation.maxUses}).`,
+          'info'
+        );
+      }
     }
 
     function shouldPreserveActivationForFreeReuse(state, activation) {
@@ -6144,9 +6301,7 @@
       if (!normalizedActivation) {
         throw new Error('缺少手机号接码订单。');
       }
-      const providerLabel = normalizedActivation.provider === PHONE_SMS_PROVIDER_5SIM
-        ? '5sim'
-        : (normalizedActivation.provider === PHONE_SMS_PROVIDER_NEXSMS ? 'NexSMS' : 'HeroSMS');
+      const providerLabel = getPhoneSmsProviderLabel(normalizedActivation.provider);
       const usePageResend = normalizedActivation.provider !== PHONE_SMS_PROVIDER_5SIM;
 
       const waitSeconds = normalizePhoneCodeWaitSeconds(state?.phoneCodeWaitSeconds);
@@ -6160,6 +6315,7 @@
       let resendTriggeredForCurrentNumber = false;
 
       for (let windowIndex = 1; windowIndex <= timeoutWindows; windowIndex += 1) {
+        let smsBowerStaleRetryRefreshSent = false;
         await setPhoneRuntimeCountdown(normalizedActivation, waitSeconds, windowIndex, timeoutWindows);
         await addLog(
           `步骤 9：等待号码 ${normalizedActivation.phoneNumber} 接收短信（等待窗口 ${windowIndex}/${timeoutWindows}，最长 ${waitSeconds} 秒，每 ${pollIntervalSeconds} 秒轮询一次，最多 ${pollMaxRounds} 次轮询）。`,
@@ -6174,7 +6330,30 @@
             intervalMs: pollIntervalSeconds * 1000,
             maxRounds: pollMaxRounds,
             onStatus: async ({ elapsedMs, pollCount, statusText }) => {
-              if (/^STATUS_(WAIT_CODE|WAIT_RETRY|WAIT_RESEND)(?::.+)?$/i.test(String(statusText || '').trim())) {
+              const normalizedStatusText = String(statusText || '').trim();
+              if (
+                !smsBowerStaleRetryRefreshSent
+                && isSmsBowerProviderReuseActivation(normalizedActivation)
+                && isSmsBowerStaleRetryStatus(normalizedStatusText)
+              ) {
+                smsBowerStaleRetryRefreshSent = true;
+                try {
+                  await requestAdditionalPhoneSms(state, normalizedActivation);
+                  await addLog(
+                    `SMSBower reuse: status still contains a previous code after submitting ${normalizedActivation.phoneNumber}; sent setStatus(3) again to wait for another SMS.`,
+                    'info'
+                  );
+                } catch (refreshError) {
+                  if (isStopRequestedError(refreshError)) {
+                    throw refreshError;
+                  }
+                  await addLog(
+                    `SMSBower reuse: failed to resend setStatus(3) for ${normalizedActivation.phoneNumber}: ${refreshError?.message || refreshError}`,
+                    'warn'
+                  );
+                }
+              }
+              if (/^STATUS_(WAIT_CODE|WAIT_RETRY|WAIT_RESEND)(?::.+)?$/i.test(normalizedStatusText)) {
                 const pageError = await checkPhoneResendPageError(tabId, state);
                 if (pageError?.reason === 'resend_phone_banned') {
                   throw new Error(`${PHONE_RESEND_BANNED_NUMBER_ERROR_PREFIX}${pageError.message || 'OpenAI 无法向此手机号发送短信。'}`);
@@ -7490,7 +7669,7 @@
             await setPhoneRuntimeState({
               [PHONE_VERIFICATION_CODE_STATE_KEY]: String(codeResult.code || '').trim(),
             });
-            activation = markActivationPhoneCodeReceived(activation) || activation;
+            activation = markActivationPhoneCodeReceived(activation, codeResult.code) || activation;
             await persistCurrentActivation(activation);
             await setPhoneRuntimeState({
               [PHONE_VERIFICATION_CODE_STATE_KEY]: String(codeResult.code || '').trim(),
@@ -7615,7 +7794,7 @@
               await markFreeReusableActivationAfterInitialSuccess(latestSuccessState, activation);
             } else if (providerReuseActivation) {
               await addLog(
-                `SMSBower reuse: kept ${activation.phoneNumber} waiting for another SMS.`,
+                `SMSBower reuse: kept ${activation.phoneNumber} for another SMS.`,
                 'info'
               );
             } else {

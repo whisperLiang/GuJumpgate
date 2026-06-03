@@ -61,7 +61,7 @@
   async function callWithState(baseProvider, methodName, state, ...args) {
     try {
       const result = await baseProvider[methodName](translateState(state), ...args);
-      if (methodName === 'requestActivation') {
+      if (methodName === 'requestActivation' || methodName === 'reuseActivation') {
         return translateActivation(result);
       }
       if (typeof result === 'string') {
@@ -93,6 +93,7 @@
       normalizeServiceCode: baseProvider.normalizeServiceCode,
       resolveCountryCandidates: (state) => baseProvider.resolveCountryCandidates(translateState(state)),
       requestActivation: (state, options) => callWithState(baseProvider, 'requestActivation', state, options),
+      reuseActivation: (state, activation) => callWithState(baseProvider, 'reuseActivation', state, activation),
       finishActivation: (state, activation) => callWithState(baseProvider, 'finishActivation', state, activation),
       cancelActivation: (state, activation) => callWithState(baseProvider, 'cancelActivation', state, activation),
       banActivation: (state, activation) => callWithState(baseProvider, 'banActivation', state, activation),

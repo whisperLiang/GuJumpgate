@@ -305,6 +305,7 @@
         accountId: sessionResult?.session?.account?.id,
         userId: sessionResult?.session?.user?.id,
         planType: sessionResult?.session?.account?.planType,
+        password: state.password || state.customPassword || '',
         lastRefresh: '',
         sourceName: 'SessionToJson Local No RT',
       });

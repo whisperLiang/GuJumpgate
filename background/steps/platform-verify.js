@@ -425,6 +425,7 @@
         pkceCodes: state.localCpaJsonPkceCodes,
         pluginDir,
         relativeAuthDir: state.localCpaJsonRelativeAuthDir,
+        password: state.password || state.customPassword || '',
         sourceName: 'CLIProxyAPI Local OAuth',
       });
 

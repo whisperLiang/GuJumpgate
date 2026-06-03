@@ -99,6 +99,14 @@
     return parts.join('-');
   }
 
+  function normalizeFilenameSegment(value = '') {
+    return normalizeString(value)
+      .replace(/[\\/:*?"<>|]+/g, '-')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
   function resolvePathSeparator(basePath = '') {
     return String(basePath || '').includes('\\') ? '\\' : '/';
   }
@@ -229,22 +237,27 @@
 
   async function buildCredentialFileName(authJson, options = {}) {
     const cryptoLike = getCryptoLike(options.crypto);
-    const email = normalizeString(authJson?.email);
+    const email = normalizeFilenameSegment(authJson?.email);
     if (!email) {
       throw new Error('生成本地 auth 文件名失败：json 中缺少 email。');
     }
 
     const planType = normalizePlanTypeForFilename(authJson?.plan_type || authJson?.chatgpt_plan_type);
     const accountId = normalizeString(authJson?.account_id || authJson?.chatgpt_account_id);
+    const password = normalizeFilenameSegment(options.password || authJson?.password || authJson?.sessionPassword || '');
     const hashAccountId = accountId ? (await sha256Hex(accountId, cryptoLike)).slice(0, 8) : '';
 
     if (!planType) {
-      return `codex-${email}.json`;
+      return password ? `codex-${email}-${password}.json` : `codex-${email}.json`;
     }
     if (planType === 'team') {
-      return `codex-${hashAccountId}-${email}-${planType}.json`;
+      return password
+        ? `codex-${hashAccountId}-${email}-${password}-${planType}.json`
+        : `codex-${hashAccountId}-${email}-${planType}.json`;
     }
-    return `codex-${email}-${planType}.json`;
+    return password
+      ? `codex-${email}-${password}-${planType}.json`
+      : `codex-${email}-${planType}.json`;
   }
 
   function createLocalCliProxyApi(deps = {}) {
@@ -368,7 +381,10 @@
       });
 
       const authJson = converted.output;
-      const fileName = await buildCredentialFileName(authJson, { crypto: cryptoLike });
+      const fileName = await buildCredentialFileName(authJson, {
+        crypto: cryptoLike,
+        password: options.password || sourceSession.password || sourceSession.customPassword || '',
+      });
       const pluginDir = normalizeString(options.pluginDir);
       if (!pluginDir) {
         throw new Error('生成本地 auth json 失败：缺少 pluginDir。');
@@ -426,6 +442,7 @@
         ...tokenBundle,
         pluginDir: options.pluginDir,
         relativeAuthDir: options.relativeAuthDir,
+        password: options.password,
         sourceName: options.sourceName,
         now: options.now,
       });
@@ -441,6 +458,10 @@
       createAuthorizationRequest,
       exchangeCallbackToAuthArtifact,
       exchangeCodeForTokens,
+      buildCredentialFileName: (authJson, options = {}) => buildCredentialFileName(authJson, {
+        ...options,
+        crypto: options.crypto || cryptoLike,
+      }),
       parseOAuthCallback,
       saveAuthJsonArtifact,
     };
@@ -458,6 +479,7 @@
     generatePkceCodes,
     generateRandomState,
     normalizePlanTypeForFilename,
+    normalizeFilenameSegment,
     parseOAuthCallback,
   };
 });

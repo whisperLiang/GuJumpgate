@@ -1,0 +1,18 @@
+{
+  "phase": "waiting_first_code",
+  "createdAt": 1779872707010,
+  "configPath": "D:\\ProgramCode\\GuJumpgate-v0.1.5\\multipage-settings-20260527-165408.json",
+  "activation": {
+    "activationId": "342080866",
+    "phoneNumber": "6285196500544",
+    "provider": "smsbower",
+    "serviceCode": "dr",
+    "countryId": 6,
+    "countryLabel": "印度尼西亚 (Indonesia)",
+    "successfulUses": 0,
+    "maxUses": 3,
+    "canGetAnotherSms": true,
+    "price": 0.008,
+    "selectedPrice": 0.008
+  }
+}

@@ -12,6 +12,9 @@
   const DEFAULT_LANG = '';
   const DEFAULT_PRICES_ACTION = 'getPricesV3';
   const DEFAULT_MAX_USES = 3;
+  const ACQUIRE_PRIORITY_COUNTRY = 'country';
+  const ACQUIRE_PRIORITY_PRICE = 'price';
+  const ACQUIRE_PRIORITY_PRICE_HIGH = 'price_high';
 
   function normalizeSmsBowerCountryId(value, fallback = DEFAULT_COUNTRY_ID) {
     const parsed = Math.floor(Number(value));
@@ -60,6 +63,22 @@
     const numeric = Number(rawValue);
     if (!Number.isFinite(numeric) || numeric <= 0) return '';
     return String(Math.round(numeric * 10000) / 10000);
+  }
+
+  function normalizeSmsBowerPriceNumber(value = '') {
+    const normalized = normalizeSmsBowerPrice(value);
+    if (!normalized) return null;
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) && numeric > 0
+      ? Math.round(numeric * 10000) / 10000
+      : null;
+  }
+
+  function normalizeSmsBowerAcquirePriority(value = '') {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === ACQUIRE_PRIORITY_PRICE) return ACQUIRE_PRIORITY_PRICE;
+    if (normalized === ACQUIRE_PRIORITY_PRICE_HIGH) return ACQUIRE_PRIORITY_PRICE_HIGH;
+    return ACQUIRE_PRIORITY_COUNTRY;
   }
 
   function normalizeSmsBowerCanGetAnotherSms(value, fallback = null) {
@@ -223,6 +242,116 @@
     };
   }
 
+  function assertValidPriceBounds(priceBounds = {}) {
+    const minPrice = normalizeSmsBowerPriceNumber(priceBounds.minPrice);
+    const maxPrice = normalizeSmsBowerPriceNumber(priceBounds.maxPrice);
+    if (minPrice !== null && maxPrice !== null && minPrice > maxPrice) {
+      throw new Error(`SMSBower price range is invalid: minPrice ${minPrice} is greater than maxPrice ${maxPrice}.`);
+    }
+  }
+
+  function hasPriceBounds(priceBounds = {}) {
+    return normalizeSmsBowerPriceNumber(priceBounds.minPrice) !== null
+      || normalizeSmsBowerPriceNumber(priceBounds.maxPrice) !== null;
+  }
+
+  function formatPriceBounds(priceBounds = {}) {
+    const minPrice = normalizeSmsBowerPriceNumber(priceBounds.minPrice);
+    const maxPrice = normalizeSmsBowerPriceNumber(priceBounds.maxPrice);
+    if (minPrice !== null && maxPrice !== null) return `${minPrice}~${maxPrice}`;
+    if (minPrice !== null) return `${minPrice}~`;
+    if (maxPrice !== null) return `~${maxPrice}`;
+    return 'auto';
+  }
+
+  function isPriceWithinBounds(price, priceBounds = {}) {
+    const normalized = normalizeSmsBowerPriceNumber(price);
+    if (normalized === null) return false;
+    const minPrice = normalizeSmsBowerPriceNumber(priceBounds.minPrice);
+    const maxPrice = normalizeSmsBowerPriceNumber(priceBounds.maxPrice);
+    if (minPrice !== null && normalized < minPrice) return false;
+    if (maxPrice !== null && normalized > maxPrice) return false;
+    return true;
+  }
+
+  function getActivationPrice(activation) {
+    return normalizeSmsBowerPriceNumber(
+      activation?.price ?? activation?.activationCost ?? activation?.cost
+    );
+  }
+
+  function describeActivationPriceBoundFailure(activation, priceBounds = {}) {
+    if (!hasPriceBounds(priceBounds)) return '';
+    const price = getActivationPrice(activation);
+    if (price === null) {
+      return `price is missing while price range ${formatPriceBounds(priceBounds)} is configured`;
+    }
+    return isPriceWithinBounds(price, priceBounds)
+      ? ''
+      : `price ${price} is outside configured range ${formatPriceBounds(priceBounds)}`;
+  }
+
+  function normalizePreferredPrice(state = {}, priceBounds = {}) {
+    const preferred = normalizeSmsBowerPriceNumber(state.smsBowerPreferredPrice || state.heroSmsPreferredPrice);
+    return preferred !== null && isPriceWithinBounds(preferred, priceBounds) ? preferred : null;
+  }
+
+  function normalizeCountryPriceFloorMap(value = {}) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const normalized = new Map();
+    Object.entries(source).forEach(([countryId, price]) => {
+      const normalizedCountryId = normalizeSmsBowerCountryId(countryId, 0);
+      const normalizedPrice = normalizeSmsBowerPriceNumber(price);
+      if (normalizedCountryId > 0 && normalizedPrice !== null) {
+        normalized.set(String(normalizedCountryId), normalizedPrice);
+      }
+    });
+    return normalized;
+  }
+
+  function reorderPriceCandidates(prices = [], acquirePriority = ACQUIRE_PRIORITY_COUNTRY, preferredPrice = null, options = {}) {
+    const priceBounds = options.priceBounds || {};
+    const priceFloor = normalizeSmsBowerPriceNumber(options.priceFloor);
+    const normalized = Array.from(
+      new Set(
+        (Array.isArray(prices) ? prices : [])
+          .map((value) => normalizeSmsBowerPriceNumber(value))
+          .filter((value) => (
+            value !== null
+            && isPriceWithinBounds(value, priceBounds)
+            && (priceFloor === null || value > priceFloor)
+          ))
+      )
+    ).sort((left, right) => left - right);
+    const ordered = acquirePriority === ACQUIRE_PRIORITY_PRICE_HIGH
+      ? normalized.reverse()
+      : normalized;
+    const preferred = normalizeSmsBowerPriceNumber(preferredPrice);
+    if (
+      preferred === null
+      || !isPriceWithinBounds(preferred, priceBounds)
+      || (priceFloor !== null && preferred <= priceFloor)
+    ) {
+      return ordered;
+    }
+    return [preferred, ...ordered.filter((value) => value !== preferred)];
+  }
+
+  function buildActivationPriceBounds(priceBounds = {}, selectedPrice = null) {
+    const price = normalizeSmsBowerPriceNumber(selectedPrice);
+    if (price !== null) {
+      const priceText = String(price);
+      return {
+        minPrice: priceText,
+        maxPrice: priceText,
+      };
+    }
+    return {
+      minPrice: priceBounds.minPrice,
+      maxPrice: priceBounds.maxPrice,
+    };
+  }
+
   function normalizeActivation(record, fallback = {}) {
     let activationId = '';
     let phoneNumber = '';
@@ -242,6 +371,16 @@
 
     if (!activationId || !phoneNumber) return null;
     const canGetAnotherSms = normalizeSmsBowerCanGetAnotherSms(record?.canGetAnotherSms, fallback.canGetAnotherSms);
+    const normalizedActivationCost = normalizeSmsBowerPriceNumber(activationCost);
+    const lastPhoneCode = extractVerificationCode(
+      record?.lastPhoneCode
+      ?? record?.previousPhoneCode
+      ?? record?.lastCode
+      ?? fallback.lastPhoneCode
+      ?? fallback.previousPhoneCode
+      ?? fallback.lastCode
+      ?? ''
+    );
     const maxUses = canGetAnotherSms === false
       ? 1
       : Math.max(1, Math.floor(Number(record?.maxUses ?? fallback.maxUses) || DEFAULT_MAX_USES));
@@ -255,7 +394,8 @@
       successfulUses: Math.max(0, Math.floor(Number(record?.successfulUses) || 0)),
       maxUses,
       ...(canGetAnotherSms !== null ? { canGetAnotherSms } : {}),
-      ...(activationCost !== undefined ? { price: Number(activationCost) } : {}),
+      ...(normalizedActivationCost !== null ? { price: normalizedActivationCost } : {}),
+      ...(lastPhoneCode ? { lastPhoneCode } : {}),
     };
   }
 
@@ -325,6 +465,163 @@
     throw lastError || new Error('SMSBower 获取手机号失败。');
   }
 
+  async function requestActivationWithPricePriority(state = {}, options = {}, deps = {}) {
+    const config = resolveConfig(state, deps);
+    const serviceCode = getServiceCode(state);
+    const priceBounds = getPriceBounds(state);
+    assertValidPriceBounds(priceBounds);
+
+    const acquirePriority = normalizeSmsBowerAcquirePriority(state.heroSmsAcquirePriority);
+    const priceBoundsConfigured = hasPriceBounds(priceBounds);
+    const preferredPrice = normalizePreferredPrice(state, priceBounds);
+    const countryPriceFloorByCountryId = normalizeCountryPriceFloorMap(options?.countryPriceFloorByCountryId);
+    const blockedCountryIds = new Set(
+      (Array.isArray(options?.blockedCountryIds) ? options.blockedCountryIds : [])
+        .map((value) => normalizeSmsBowerCountryId(value, 0))
+        .filter((id) => id > 0)
+    );
+    let countryCandidates = resolveCountryCandidates(state)
+      .filter((entry) => !blockedCountryIds.has(normalizeSmsBowerCountryId(entry.id, 0)));
+    if (!countryCandidates.length) {
+      countryCandidates = resolveCountryCandidates(state);
+    }
+
+    const shouldResolvePrices = (
+      acquirePriority === ACQUIRE_PRIORITY_PRICE
+      || acquirePriority === ACQUIRE_PRIORITY_PRICE_HIGH
+      || priceBoundsConfigured
+      || preferredPrice !== null
+      || countryPriceFloorByCountryId.size > 0
+    );
+    const countryAttempts = countryCandidates.map((countryConfig, index) => ({
+      index,
+      countryConfig,
+      pricePlan: null,
+      priceCandidates: [],
+      orderingPrice: Number.POSITIVE_INFINITY,
+    }));
+
+    if (shouldResolvePrices) {
+      for (const attempt of countryAttempts) {
+        const countryIdKey = String(normalizeSmsBowerCountryId(attempt.countryConfig?.id, 0));
+        const priceFloor = countryPriceFloorByCountryId.get(countryIdKey) ?? null;
+        const pricePlan = await resolvePricePlan(config, state, attempt.countryConfig, priceBounds);
+        const priceCandidates = reorderPriceCandidates(
+          pricePlan.prices,
+          acquirePriority,
+          preferredPrice,
+          { priceBounds, priceFloor }
+        );
+        attempt.pricePlan = pricePlan;
+        attempt.priceCandidates = priceCandidates;
+        attempt.orderingPrice = priceCandidates.length ? priceCandidates[0] : Number.POSITIVE_INFINITY;
+      }
+    }
+
+    if (
+      (acquirePriority === ACQUIRE_PRIORITY_PRICE || acquirePriority === ACQUIRE_PRIORITY_PRICE_HIGH)
+      && countryAttempts.length > 1
+    ) {
+      countryAttempts.sort((left, right) => {
+        if (left.orderingPrice !== right.orderingPrice) {
+          return acquirePriority === ACQUIRE_PRIORITY_PRICE_HIGH
+            ? right.orderingPrice - left.orderingPrice
+            : left.orderingPrice - right.orderingPrice;
+        }
+        return left.index - right.index;
+      });
+    }
+
+    const attachPriceHint = (activation, selectedPrice = null) => {
+      const selected = normalizeSmsBowerPriceNumber(selectedPrice);
+      const actual = normalizeSmsBowerPriceNumber(activation?.price);
+      const priceHint = actual !== null ? actual : selected;
+      if (priceHint !== null && typeof deps.rememberActivationAcquiredPrice === 'function') {
+        deps.rememberActivationAcquiredPrice(activation, priceHint);
+      }
+      if (selected === null) {
+        return activation;
+      }
+      return {
+        ...activation,
+        selectedPrice: selected,
+        ...(actual === null ? { price: selected } : {}),
+      };
+    };
+
+    const failures = [];
+    let lastError = null;
+    for (const attempt of countryAttempts) {
+      const countryConfig = attempt.countryConfig;
+      const countryId = normalizeSmsBowerCountryId(countryConfig.id);
+      const countryIdKey = String(countryId);
+      const priceFloor = countryPriceFloorByCountryId.get(countryIdKey) ?? null;
+      const priceCandidates = shouldResolvePrices ? attempt.priceCandidates : [];
+      if (shouldResolvePrices && !priceCandidates.length) {
+        const rangeText = formatPriceBounds(priceBounds);
+        failures.push(
+          priceFloor !== null
+            ? `${countryConfig.label}: no price tier above ${priceFloor} within ${rangeText}`
+            : `${countryConfig.label}: no price tier within ${rangeText}`
+        );
+        continue;
+      }
+      const pricesToTry = priceCandidates.length ? priceCandidates : [null];
+      const actions = priceBoundsConfigured ? ['getNumberV2'] : ['getNumberV2', 'getNumber'];
+
+      for (const selectedPrice of pricesToTry) {
+        const requestPriceBounds = buildActivationPriceBounds(priceBounds, selectedPrice);
+        for (const action of actions) {
+          try {
+            const payload = await fetchPayload(config, {
+              action,
+              service: serviceCode,
+              country: countryId,
+              minPrice: requestPriceBounds.minPrice,
+              maxPrice: requestPriceBounds.maxPrice,
+            }, `SMSBower ${action}`);
+            const activation = normalizeActivation(payload, {
+              serviceCode,
+              countryId,
+              countryLabel: countryConfig.label,
+            });
+            if (activation) {
+              const priceFailure = describeActivationPriceBoundFailure(activation, priceBounds);
+              if (priceFailure) {
+                try {
+                  await cancelActivation(state, activation, deps);
+                } catch (_) {
+                  // Best-effort refund/cancel when SMSBower returns an out-of-range activation.
+                }
+                failures.push(`${countryConfig.label}: ${priceFailure}`);
+                continue;
+              }
+              return attachPriceHint(activation, selectedPrice);
+            }
+            const text = describePayload(payload);
+            if (isTerminalPayload(text)) {
+              throw new Error(`SMSBower ${action} failed: ${text}`);
+            }
+            failures.push(`${countryConfig.label}: ${text || 'empty response'}`);
+          } catch (error) {
+            const payloadOrMessage = error?.payload || error?.message;
+            const text = describePayload(payloadOrMessage);
+            if (isTerminalPayload(payloadOrMessage) && !isNoNumbersPayload(payloadOrMessage)) {
+              throw new Error(`SMSBower acquire failed: ${text || 'unknown error'}`);
+            }
+            lastError = error;
+            failures.push(`${countryConfig.label}: ${text || error?.message || 'unknown error'}`);
+          }
+        }
+      }
+    }
+
+    if (failures.length) {
+      throw new Error(`SMSBower tried ${countryCandidates.length} candidate countries, no available numbers: ${Array.from(new Set(failures)).join(' | ')}.`);
+    }
+    throw lastError || new Error('SMSBower acquire failed.');
+  }
+
   async function setActivationStatus(state = {}, activation, status, deps = {}) {
     const normalizedActivation = normalizeActivation(activation, activation);
     if (!normalizedActivation) return '';
@@ -353,28 +650,47 @@
     if (!normalizedActivation) {
       throw new Error('Missing reusable SMSBower activation.');
     }
-    if (normalizedActivation.canGetAnotherSms === false) {
-      throw new Error('SMSBower activation does not support another SMS.');
-    }
+    const reusableActivation = {
+      ...normalizedActivation,
+      maxUses: Math.max(normalizedActivation.maxUses || 0, DEFAULT_MAX_USES),
+    };
 
     const payload = await fetchPayload(resolveConfig(state, deps), {
       action: 'getStatus',
-      id: normalizedActivation.activationId,
+      id: reusableActivation.activationId,
     }, 'SMSBower getStatus');
     const statusText = describePayload(payload);
 
+    if (/^STATUS_(WAIT_RETRY|WAIT_RESEND):.+$/i.test(statusText)) {
+      await requestAdditionalSms(state, reusableActivation, deps);
+      if (typeof deps.addLog === 'function') {
+        await deps.addLog(
+          'SMSBower reuse: status still contains a previous code; requested another SMS with setStatus(3).',
+          'info'
+        );
+      }
+      return {
+        ...reusableActivation,
+        canGetAnotherSms: true,
+        source: reusableActivation.source || 'smsbower-reuse',
+        reusePreparedAt: Date.now(),
+      };
+    }
+
     if (/^STATUS_(WAIT_CODE|WAIT_RETRY|WAIT_RESEND)(?::.+)?$/i.test(statusText)) {
       return {
-        ...normalizedActivation,
-        source: normalizedActivation.source || 'smsbower-reuse',
+        ...reusableActivation,
+        canGetAnotherSms: true,
+        source: reusableActivation.source || 'smsbower-reuse',
       };
     }
 
     if (/^STATUS_OK(?::.+)?$/i.test(statusText)) {
-      await requestAdditionalSms(state, normalizedActivation, deps);
+      await requestAdditionalSms(state, reusableActivation, deps);
       return {
-        ...normalizedActivation,
-        source: normalizedActivation.source || 'smsbower-reuse',
+        ...reusableActivation,
+        canGetAnotherSms: true,
+        source: reusableActivation.source || 'smsbower-reuse',
         reusePreparedAt: Date.now(),
       };
     }
@@ -431,6 +747,13 @@
       const code = okMatch ? extractVerificationCode(okMatch[1]) : '';
       if (code) return code;
 
+      const retryCodeMatch = String(lastResponse || '').match(/^STATUS_(?:WAIT_RETRY|WAIT_RESEND):(.+)$/i);
+      const retryCode = retryCodeMatch ? extractVerificationCode(retryCodeMatch[1]) : '';
+      const lastPhoneCode = extractVerificationCode(normalizedActivation.lastPhoneCode || '');
+      if (retryCode && lastPhoneCode && retryCode !== lastPhoneCode) {
+        return retryCode;
+      }
+
       if (/^STATUS_(WAIT_CODE|WAIT_RETRY|WAIT_RESEND)(?::.+)?$/i.test(lastResponse)) {
         if (typeof options.onWaitingForCode === 'function') {
           await options.onWaitingForCode({
@@ -477,23 +800,59 @@
     }
     if (!payload || typeof payload !== 'object') return entries;
 
-    const directPrice = Number(payload.price ?? payload.cost);
-    const directCount = Number(payload.count ?? payload.qty);
-    if (Number.isFinite(directPrice) && directPrice > 0) {
+    const normalizeCount = (...values) => {
+      const counts = values
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value));
+      if (!counts.length) return null;
+      return Math.max(0, Math.floor(Math.max(...counts)));
+    };
+
+    const directPrice = normalizeSmsBowerPriceNumber(payload.price ?? payload.cost);
+    if (directPrice !== null) {
+      const directCount = normalizeCount(
+        payload.count,
+        payload.qty,
+        payload.Qty,
+        payload.stock,
+        payload.available,
+        payload.quantity,
+        payload.left,
+        payload.free
+      );
       entries.push({
-        cost: Math.round(directPrice * 10000) / 10000,
-        count: Number.isFinite(directCount) ? Math.max(0, directCount) : 0,
-        inStock: !Number.isFinite(directCount) || directCount > 0,
+        cost: directPrice,
+        count: directCount,
+        inStock: directCount === null || directCount > 0,
       });
     }
+
     Object.entries(payload).forEach(([key, value]) => {
-      const keyedPrice = Number(key);
-      if (Number.isFinite(keyedPrice) && keyedPrice > 0) {
-        const count = Number(value?.count ?? value);
+      const keyedPrice = normalizeSmsBowerPriceNumber(key);
+      if (keyedPrice !== null) {
+        const trimmedKey = String(key || '').trim();
+        const looksLikeDecimalPriceKey = /^-?\d+[.,]\d+$/.test(trimmedKey)
+          || /^[^\d-]*-?\d+[.,]\d+[^\d]*$/.test(trimmedKey);
+        if (value && typeof value === 'object' && !looksLikeDecimalPriceKey) {
+          collectPriceEntries(value, entries);
+          return;
+        }
+        const count = value && typeof value === 'object'
+          ? normalizeCount(
+            value.count,
+            value.qty,
+            value.Qty,
+            value.stock,
+            value.available,
+            value.quantity,
+            value.left,
+            value.free
+          )
+          : normalizeCount(value);
         entries.push({
-          cost: Math.round(keyedPrice * 10000) / 10000,
-          count: Number.isFinite(count) ? Math.max(0, count) : 0,
-          inStock: !Number.isFinite(count) || count > 0,
+          cost: keyedPrice,
+          count,
+          inStock: count === null || count > 0,
         });
       }
       collectPriceEntries(value, entries);
@@ -501,11 +860,52 @@
     return entries;
   }
 
+  async function resolvePricePlan(config, state = {}, countryConfig = resolveCountryConfig(state), priceBounds = {}) {
+    const serviceCode = getServiceCode(state);
+    const primaryAction = normalizeSmsBowerPricesAction(config.pricesAction);
+    const actions = primaryAction === 'getPrices'
+      ? ['getPrices']
+      : ['getPricesV3', 'getPrices'];
+    const errors = [];
+    let entries = [];
+
+    for (const action of actions) {
+      try {
+        const payload = await fetchPayload(config, {
+          action,
+          service: serviceCode,
+          country: normalizeSmsBowerCountryId(countryConfig?.id),
+        }, `SMSBower ${action}`);
+        entries = collectPriceEntries(payload, [])
+          .filter((entry) => (
+            entry?.inStock !== false
+            && isPriceWithinBounds(entry?.cost, priceBounds)
+          ));
+        if (entries.length) {
+          break;
+        }
+      } catch (error) {
+        errors.push(describePayload(error?.payload || error?.message || error));
+      }
+    }
+
+    const prices = Array.from(
+      new Set(
+        entries
+          .map((entry) => normalizeSmsBowerPriceNumber(entry.cost))
+          .filter((price) => price !== null)
+      )
+    ).sort((left, right) => left - right);
+    return { prices, entries, errors };
+  }
+
   function createProvider(deps = {}) {
     const providerDeps = {
+      addLog: deps.addLog,
       fetchImpl: deps.fetchImpl,
       sleepWithStop: deps.sleepWithStop,
       throwIfStopped: deps.throwIfStopped,
+      rememberActivationAcquiredPrice: deps.rememberActivationAcquiredPrice,
       requestTimeoutMs: deps.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS,
     };
     return {
@@ -521,7 +921,7 @@
       normalizeMaxPrice: normalizeSmsBowerPrice,
       normalizeServiceCode: normalizeSmsBowerServiceCode,
       resolveCountryCandidates,
-      requestActivation: (state, options) => requestActivation(state, options, providerDeps),
+      requestActivation: (state, options) => requestActivationWithPricePriority(state, options, providerDeps),
       finishActivation: (state, activation) => finishActivation(state, activation, providerDeps),
       cancelActivation: (state, activation) => cancelActivation(state, activation, providerDeps),
       banActivation: (state, activation) => cancelActivation(state, activation, providerDeps),
