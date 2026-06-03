@@ -69,6 +69,10 @@ importScripts(
   'luckmail-utils.js',
   'cloudflare-temp-email-utils.js',
   'cloudmail-utils.js',
+  'freemail-utils.js',
+  'outlook-email-plus-utils.js',
+  'background/freemail-provider.js',
+  'background/outlook-email-plus-provider.js',
   'background/cloudmail-provider.js',
   'icloud-utils.js',
   'mail-provider-utils.js',
@@ -334,6 +338,36 @@ const {
   normalizeCloudMailMailApiMessages,
 } = self.CloudMailUtils;
 const {
+  DEFAULT_MAIL_PAGE_SIZE: FREEMAIL_DEFAULT_PAGE_SIZE,
+  buildFreemailHeaders,
+  getFreemailAddressFromResponse,
+  joinFreemailUrl,
+  normalizeFreemailAddress,
+  normalizeFreemailBaseUrl,
+  normalizeFreemailDomain,
+  normalizeFreemailDomains,
+  normalizeFreemailMessages,
+} = self.FreemailUtils;
+const {
+  DEFAULT_OUTLOOK_EMAIL_PLUS_BASE_URL,
+  buildOutlookEmailPlusAliasAddress,
+  buildOutlookEmailPlusHeaders,
+  buildOutlookEmailPlusPayPalAliasAddress,
+  deriveOutlookEmailPlusBaseAddress,
+  generateOutlookEmailPlusTag,
+  getOutlookEmailPlusPayPalAliasIndex,
+  isOutlookEmailPlusTaggedAlias,
+  joinOutlookEmailPlusUrl,
+  normalizeOutlookEmailPlusAddress,
+  normalizeOutlookEmailPlusBaseUrl,
+  normalizeOutlookEmailPlusCallerIdPrefix,
+  normalizeOutlookEmailPlusClaim,
+  normalizeOutlookEmailPlusProjectKey,
+  normalizeOutlookEmailPlusProvider,
+  normalizeOutlookEmailPlusVerificationCode,
+  unwrapOutlookEmailPlusResponse,
+} = self.OutlookEmailPlusUtils;
+const {
   findIcloudAliasByEmail,
   getConfiguredIcloudHostPreference,
   getIcloudHostHintFromMessage,
@@ -349,8 +383,11 @@ const {
 } = self.IcloudUtils;
 const {
   getIcloudForwardMailConfig: getSharedIcloudForwardMailConfig,
+  buildIcloudApiEndpoint,
+  normalizeIcloudApiBaseUrl,
   normalizeIcloudForwardMailProvider,
   normalizeIcloudTargetMailboxType,
+  parseHiddenEmailCredential,
 } = self.MailProviderUtils;
 const {
   isRecoverableStep9AuthFailure,
@@ -417,6 +454,18 @@ function buildFlowRegistrationEmailStateUpdates(state = {}, options = {}) {
   return buildRegistrationEmailStateUpdates(state, options);
 }
 
+function buildClearedRegistrationEmailStateUpdates(state = {}, options = {}) {
+  if (registrationEmailStateHelpers?.buildClearedRegistrationEmailStateUpdates) {
+    return registrationEmailStateHelpers.buildClearedRegistrationEmailStateUpdates(state, options);
+  }
+  return buildFlowRegistrationEmailStateUpdates(state, {
+    currentEmail: '',
+    preservePrevious: options?.preservePrevious !== false,
+    preserveAccountIdentity: Boolean(options?.preserveAccountIdentity),
+    source: options?.source || '',
+  });
+}
+
 function getPreservedPhoneIdentity(state = {}) {
   if (registrationEmailStateHelpers?.getPreservedPhoneIdentity) {
     return registrationEmailStateHelpers.getPreservedPhoneIdentity(state);
@@ -469,6 +518,7 @@ const ICLOUD_ALIAS_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const ICLOUD_TRANSIENT_RETRY_MAX_ATTEMPTS = 2;
 const ICLOUD_TRANSIENT_RETRY_DELAY_MS = 1200;
 const ICLOUD_PROVIDER = 'icloud';
+const ICLOUD_API_PROVIDER = 'icloud-api';
 const GMAIL_PROVIDER = 'gmail';
 const GMAIL_ALIAS_GENERATOR = 'gmail-alias';
 const HOTMAIL_PROVIDER = 'hotmail-api';
@@ -477,12 +527,17 @@ const CLOUDFLARE_TEMP_EMAIL_PROVIDER = 'cloudflare-temp-email';
 const CLOUDFLARE_TEMP_EMAIL_GENERATOR = 'cloudflare-temp-email';
 const CLOUD_MAIL_PROVIDER = 'cloudmail';
 const CLOUD_MAIL_GENERATOR = 'cloudmail';
+const FREEMAIL_PROVIDER = 'freemail';
+const FREEMAIL_GENERATOR = 'freemail';
+const OUTLOOK_EMAIL_PLUS_PROVIDER = 'outlook-email-plus';
+const OUTLOOK_EMAIL_PLUS_GENERATOR = 'outlook-email-plus';
 const CUSTOM_EMAIL_POOL_GENERATOR = 'custom-pool';
 const HOTMAIL_MAILBOXES = ['INBOX', 'Junk'];
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const CLOUDFLARE_SECURITY_BLOCK_ERROR_PREFIX = 'CF_SECURITY_BLOCKED::';
 const CLOUDFLARE_SECURITY_BLOCK_USER_MESSAGE = '您已触发Cloudflare 安全防护系统，已完全停止流程，请不要短时间内多次进行重新发送验证码，连续刷新、反复点击重试会加重风控；请先关闭页面等待 15-30 分钟，让系统的临时限制自动解除。或者更换浏览器';
 const BROWSER_SWITCH_REQUIRED_ERROR_PREFIX = 'BROWSER_SWITCH_REQUIRED::';
+const STEP9_WHATSAPP_PAGE_RESTART_ERROR_PREFIX = 'STEP9_WHATSAPP_PAGE_RESTART::';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const STEP6_MAX_ATTEMPTS = 3;
@@ -593,8 +648,11 @@ const VERIFICATION_RESEND_COUNT_MIN = 0;
 const VERIFICATION_RESEND_COUNT_MAX = 20;
 const DEFAULT_VERIFICATION_RESEND_COUNT = 0;
 const PHONE_REPLACEMENT_LIMIT_MIN = 1;
-const PHONE_REPLACEMENT_LIMIT_MAX = 20;
+const PHONE_REPLACEMENT_LIMIT_MAX = 100;
 const DEFAULT_PHONE_VERIFICATION_REPLACEMENT_LIMIT = 3;
+const WHATSAPP_PHONE_VERIFICATION_RESTART_LIMIT_MIN = 1;
+const WHATSAPP_PHONE_VERIFICATION_RESTART_LIMIT_MAX = 20;
+const DEFAULT_WHATSAPP_PHONE_VERIFICATION_RESTART_MAX_ATTEMPTS = 3;
 const PHONE_CODE_WAIT_SECONDS_MIN = 15;
 const PHONE_CODE_WAIT_SECONDS_MAX = 300;
 const DEFAULT_PHONE_CODE_WAIT_SECONDS = 120;
@@ -607,6 +665,9 @@ const DEFAULT_PHONE_CODE_POLL_INTERVAL_SECONDS = 5;
 const PHONE_CODE_POLL_ROUNDS_MIN = 1;
 const PHONE_CODE_POLL_ROUNDS_MAX = 120;
 const DEFAULT_PHONE_CODE_POLL_ROUNDS = 4;
+const PHONE_ACTIVATION_RETRY_ROUNDS_MIN = 1;
+const PHONE_ACTIVATION_RETRY_ROUNDS_MAX = 10;
+const DEFAULT_PHONE_ACTIVATION_RETRY_ROUNDS = 3;
 const LEGACY_AUTO_STEP_DELAY_KEYS = ['autoStepRandomDelayMinSeconds', 'autoStepRandomDelayMaxSeconds'];
 const LEGACY_VERIFICATION_RESEND_COUNT_KEYS = ['signupVerificationResendCount', 'loginVerificationResendCount'];
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
@@ -667,7 +728,7 @@ const DEFAULT_SMSPOOL_BASE_URL = 'https://api.smspool.net/stubs/handler_api.php?
 const DEFAULT_SMSPOOL_SERVICE_CODE = '671';
 const DEFAULT_SMSPOOL_COUNTRY_ID = 1;
 const DEFAULT_SMSPOOL_COUNTRY_LABEL = 'United States';
-const DEFAULT_HERO_SMS_REUSE_ENABLED = true;
+const DEFAULT_HERO_SMS_REUSE_ENABLED = false;
 const HERO_SMS_ACQUIRE_PRIORITY_COUNTRY = 'country';
 const HERO_SMS_ACQUIRE_PRIORITY_PRICE = 'price';
 const HERO_SMS_ACQUIRE_PRIORITY_PRICE_HIGH = 'price_high';
@@ -739,11 +800,7 @@ function isPlusModeState(state = {}) {
 }
 
 function normalizePlusPaymentMethod(value = '') {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === PLUS_PAYMENT_METHOD_GPC_HELPER) {
-    return PLUS_PAYMENT_METHOD_GPC_HELPER;
-  }
-  return normalized === PLUS_PAYMENT_METHOD_GOPAY ? PLUS_PAYMENT_METHOD_GOPAY : PLUS_PAYMENT_METHOD_PAYPAL;
+  return PLUS_PAYMENT_METHOD_PAYPAL;
 }
 
 function normalizeGpcHelperPhoneMode(value = '') {
@@ -1040,6 +1097,8 @@ const PERSISTED_SETTING_DEFAULTS = {
   plusModeEnabled: true,
   plusPaymentMethod: DEFAULT_PLUS_PAYMENT_METHOD,
   plusAccountAccessStrategy: PLUS_ACCOUNT_ACCESS_STRATEGY_OAUTH,
+  plusCheckoutMode: 'us_pp',
+  plusCheckoutProfiles: {},
   plusHostedCheckoutOauthDelaySeconds: 10,
   plusCheckoutCloudConversionEnabled: false,
   plusCheckoutCloudConversionApiUrl: BUILTIN_PLUS_CHECKOUT_CLOUD_CONVERSION_API_URL,
@@ -1120,6 +1179,7 @@ const PERSISTED_SETTING_DEFAULTS = {
   step6CookieCleanupEnabled: false,
   phoneVerificationEnabled: false,
   phoneSignupReloginAfterBindEmailEnabled: false,
+  phoneAutoReleaseOnStopEnabled: true,
   phoneSmsReuseEnabled: DEFAULT_HERO_SMS_REUSE_ENABLED,
   freePhoneReuseEnabled: true,
   freePhoneReuseAutoEnabled: true,
@@ -1128,10 +1188,13 @@ const PERSISTED_SETTING_DEFAULTS = {
   phoneSmsProviderOrder: [],
   verificationResendCount: DEFAULT_VERIFICATION_RESEND_COUNT,
   phoneVerificationReplacementLimit: DEFAULT_PHONE_VERIFICATION_REPLACEMENT_LIMIT,
+  whatsappPhoneVerificationRestartEnabled: true,
+  whatsappPhoneVerificationRestartMaxAttempts: DEFAULT_WHATSAPP_PHONE_VERIFICATION_RESTART_MAX_ATTEMPTS,
   phoneCodeWaitSeconds: DEFAULT_PHONE_CODE_WAIT_SECONDS,
   phoneCodeTimeoutWindows: DEFAULT_PHONE_CODE_TIMEOUT_WINDOWS,
   phoneCodePollIntervalSeconds: DEFAULT_PHONE_CODE_POLL_INTERVAL_SECONDS,
   phoneCodePollMaxRounds: DEFAULT_PHONE_CODE_POLL_ROUNDS,
+  heroSmsActivationRetryRounds: DEFAULT_PHONE_ACTIVATION_RETRY_ROUNDS,
   mailProvider: HOTMAIL_PROVIDER,
   mail2925Mode: DEFAULT_MAIL_2925_MODE,
   mail2925UseAccountPool: false,
@@ -1143,6 +1206,8 @@ const PERSISTED_SETTING_DEFAULTS = {
   icloudHostPreference: 'auto',
   icloudTargetMailboxType: 'icloud-inbox',
   icloudForwardMailProvider: 'qq',
+  icloudApiBaseUrl: '',
+  icloudApiAdminKey: '',
   icloudFetchMode: 'reuse_existing',
   accountRunHistoryTextEnabled: true,
   accountRunHistoryHelperBaseUrl: DEFAULT_ACCOUNT_RUN_HISTORY_HELPER_BASE_URL,
@@ -1179,6 +1244,17 @@ const PERSISTED_SETTING_DEFAULTS = {
   cloudMailReceiveMailbox: '',
   cloudMailDomain: '',
   cloudMailDomains: [],
+  freemailBaseUrl: '',
+  freemailAdminUsername: '',
+  freemailAdminPassword: '',
+  freemailDomain: '',
+  freemailDomains: [],
+  outlookEmailPlusBaseUrl: DEFAULT_OUTLOOK_EMAIL_PLUS_BASE_URL,
+  outlookEmailPlusApiKey: '',
+  outlookEmailPlusProvider: 'outlook',
+  outlookEmailPlusProjectKey: 'openai',
+  outlookEmailPlusCallerIdPrefix: 'gujumpgate',
+  outlookEmailPlusAliasMaxPerMailbox: OUTLOOK_ALIAS_DEFAULT_MAX_PER_ACCOUNT,
   hotmailAccounts: [],
   hotmailAliasEnabled: false,
   outlookAliasMaxPerAccount: OUTLOOK_ALIAS_DEFAULT_MAX_PER_ACCOUNT,
@@ -1235,7 +1311,7 @@ const PERSISTED_SETTING_DEFAULTS = {
   grizzlySmsMaxPrice: '',
   grizzlySmsPreferredPrice: '',
   smsPoolApiKey: '',
-  smsPoolBaseUrl: DEFAULT_SMSPOOL_BASE_URL,
+  smsPoolBaseUrl: 'https://api.smspool.net',
   smsPoolServiceCode: DEFAULT_SMSPOOL_SERVICE_CODE,
   smsPoolCountryId: DEFAULT_SMSPOOL_COUNTRY_ID,
   smsPoolCountryLabel: DEFAULT_SMSPOOL_COUNTRY_LABEL,
@@ -1245,6 +1321,110 @@ const PERSISTED_SETTING_DEFAULTS = {
   smsPoolPreferredPrice: '',
   phonePreferredActivation: null,
 };
+
+const PLUS_CHECKOUT_MODE_US_PP = 'us_pp';
+const PLUS_CHECKOUT_MODE_JP_PP = 'jp_pp';
+const DEFAULT_PLUS_CHECKOUT_MODE = PLUS_CHECKOUT_MODE_US_PP;
+const PLUS_CHECKOUT_PROFILE_SETTING_KEYS = Object.freeze([
+  'hostedCheckoutVerificationUrl',
+  'hostedCheckoutPhoneNumber',
+  'hostedCheckoutSmsPoolText',
+  'hostedCheckoutSmsPoolUsage',
+]);
+const PLUS_CHECKOUT_MODE_VALUES = Object.freeze([
+  PLUS_CHECKOUT_MODE_US_PP,
+  PLUS_CHECKOUT_MODE_JP_PP,
+]);
+
+function buildDefaultPlusCheckoutProfile() {
+  return {
+    hostedCheckoutVerificationUrl: '',
+    hostedCheckoutPhoneNumber: '',
+    hostedCheckoutSmsPoolText: '',
+    hostedCheckoutSmsPoolUsage: {},
+  };
+}
+
+function normalizePlusCheckoutMode(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === PLUS_CHECKOUT_MODE_JP_PP
+    ? PLUS_CHECKOUT_MODE_JP_PP
+    : DEFAULT_PLUS_CHECKOUT_MODE;
+}
+
+function normalizePlusCheckoutProfile(profile = {}, fallback = null) {
+  const rawProfile = profile && typeof profile === 'object' && !Array.isArray(profile)
+    ? profile
+    : {};
+  const baseProfile = fallback && typeof fallback === 'object' && !Array.isArray(fallback)
+    ? fallback
+    : buildDefaultPlusCheckoutProfile();
+  const normalizedProfile = {};
+  for (const key of PLUS_CHECKOUT_PROFILE_SETTING_KEYS) {
+    const sourceValue = Object.prototype.hasOwnProperty.call(rawProfile, key)
+      ? rawProfile[key]
+      : baseProfile[key];
+    normalizedProfile[key] = normalizePersistentSettingValue(key, sourceValue);
+  }
+  return normalizedProfile;
+}
+
+function buildLegacyPlusCheckoutProfileFromState(state = {}) {
+  const source = state && typeof state === 'object' && !Array.isArray(state) ? state : {};
+  return normalizePlusCheckoutProfile(Object.fromEntries(
+    PLUS_CHECKOUT_PROFILE_SETTING_KEYS.map((key) => [key, source[key]])
+  ));
+}
+
+function normalizePlusCheckoutProfiles(value = {}, fallbackState = {}) {
+  const rawProfiles = value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : {};
+  const legacyProfile = buildLegacyPlusCheckoutProfileFromState({
+    ...PERSISTED_SETTING_DEFAULTS,
+    ...(fallbackState && typeof fallbackState === 'object' && !Array.isArray(fallbackState) ? fallbackState : {}),
+  });
+  const hasUsProfile = Object.prototype.hasOwnProperty.call(rawProfiles, PLUS_CHECKOUT_MODE_US_PP);
+  const hasJpProfile = Object.prototype.hasOwnProperty.call(rawProfiles, PLUS_CHECKOUT_MODE_JP_PP);
+  const usProfile = hasUsProfile
+    ? normalizePlusCheckoutProfile(rawProfiles[PLUS_CHECKOUT_MODE_US_PP])
+    : normalizePlusCheckoutProfile(legacyProfile);
+  const jpProfile = hasJpProfile
+    ? normalizePlusCheckoutProfile(rawProfiles[PLUS_CHECKOUT_MODE_JP_PP])
+    : normalizePlusCheckoutProfile(hasUsProfile ? usProfile : legacyProfile);
+  return {
+    [PLUS_CHECKOUT_MODE_US_PP]: usProfile,
+    [PLUS_CHECKOUT_MODE_JP_PP]: jpProfile,
+  };
+}
+
+function buildPlusCheckoutLegacyFieldMirror(profile = {}) {
+  const normalizedProfile = normalizePlusCheckoutProfile(profile);
+  return Object.fromEntries(
+    PLUS_CHECKOUT_PROFILE_SETTING_KEYS.map((key) => [key, normalizedProfile[key]])
+  );
+}
+
+function applyActivePlusCheckoutProfileToState(state = {}) {
+  const source = state && typeof state === 'object' && !Array.isArray(state) ? state : {};
+  const mode = normalizePlusCheckoutMode(source.plusCheckoutMode);
+  const profiles = normalizePlusCheckoutProfiles(source.plusCheckoutProfiles, source);
+  const activeProfileFromLegacy = buildLegacyPlusCheckoutProfileFromState(source);
+  const activeProfile = normalizePlusCheckoutProfile({
+    ...(profiles[mode] || {}),
+    ...activeProfileFromLegacy,
+  }, profiles[mode] || activeProfileFromLegacy);
+  const nextProfiles = {
+    ...profiles,
+    [mode]: activeProfile,
+  };
+  return {
+    ...source,
+    plusCheckoutMode: mode,
+    plusCheckoutProfiles: nextProfiles,
+    ...buildPlusCheckoutLegacyFieldMirror(activeProfile),
+  };
+}
 
 const PERSISTED_SETTING_KEYS = Object.keys(PERSISTED_SETTING_DEFAULTS);
 const SETTINGS_EXPORT_SCHEMA_VERSION = 1;
@@ -1266,6 +1446,7 @@ const DEFAULT_STATE = {
   accountIdentifier: '',
   registrationEmailState: { ...DEFAULT_REGISTRATION_EMAIL_STATE },
   email: null, // 运行时邮箱，由程序自动获取并写入，不能手动预填。
+  boundEmail: '', // 手机号注册后绑定的邮箱，绑定后重登优先使用。
   password: null, // 运行时实际密码，由 customPassword 或程序自动生成后写入。
   accounts: [], // 已生成账号记录：{ email, password, createdAt }。
   accountRunHistory: [], // 账号运行历史快照，实际持久化在 chrome.storage.local。
@@ -1295,6 +1476,9 @@ const DEFAULT_STATE = {
   plusCheckoutCountry: 'DE',
   plusCheckoutCurrency: 'EUR',
   plusCheckoutSource: '',
+  paypalGenericErrorRecoveryCount: 0,
+  paypalApprovalBranchRecoveryCount: 0,
+  pendingPayPalCookieCleanupBeforeCheckoutCreate: false,
   hostedCheckoutCurrentSmsEntry: null,
   chatGptApiCurrentSmsEntry: null,
   plusBillingCountryText: '',
@@ -1372,6 +1556,8 @@ const DEFAULT_STATE = {
   signupPhoneCompletedActivation: null,
   signupPhoneVerificationRequestedAt: null,
   signupPhoneVerificationPurpose: '',
+  signupPhoneExcludedNumbersThisAttempt: [],
+  whatsappPhoneVerificationRestartCount: 0,
   heroSmsLastPriceTiers: [],
   heroSmsLastPriceCountryId: 0,
   heroSmsLastPriceCountryLabel: '',
@@ -1396,6 +1582,7 @@ const DEFAULT_STATE = {
   oauthFlowDeadlineSourceUrl: null,
   currentPayPalAccountId: null,
   currentHotmailAccountId: null,
+  currentOutlookEmailPlusClaim: null,
   currentMail2925AccountId: null,
   preferredIcloudHost: '',
   ipProxyApplied: false,
@@ -1636,6 +1823,22 @@ function normalizeOutlookAliasMaxPerAccount(value, fallback = OUTLOOK_ALIAS_DEFA
   return Math.min(OUTLOOK_ALIAS_MAX_PER_ACCOUNT_LIMIT, Math.max(1, Math.floor(numeric)));
 }
 
+function normalizeOutlookEmailPlusAliasMaxPerMailbox(value, fallback = OUTLOOK_ALIAS_DEFAULT_MAX_PER_ACCOUNT) {
+  const rawValue = String(value ?? '').trim();
+  const fallbackNumber = Number(fallback);
+  const normalizedFallback = Number.isFinite(fallbackNumber)
+    ? Math.min(OUTLOOK_ALIAS_MAX_PER_ACCOUNT_LIMIT, Math.max(1, Math.floor(fallbackNumber)))
+    : OUTLOOK_ALIAS_DEFAULT_MAX_PER_ACCOUNT;
+  if (!rawValue) {
+    return normalizedFallback;
+  }
+  const numeric = Number(rawValue);
+  if (!Number.isFinite(numeric)) {
+    return normalizedFallback;
+  }
+  return Math.min(OUTLOOK_ALIAS_MAX_PER_ACCOUNT_LIMIT, Math.max(1, Math.floor(numeric)));
+}
+
 function normalizeVerificationResendCount(value, fallback) {
   const rawValue = String(value ?? '').trim();
   if (!rawValue) {
@@ -1665,6 +1868,27 @@ function normalizePhoneVerificationReplacementLimit(value, fallback = DEFAULT_PH
   return Math.min(
     PHONE_REPLACEMENT_LIMIT_MAX,
     Math.max(PHONE_REPLACEMENT_LIMIT_MIN, Math.floor(numeric))
+  );
+}
+
+function normalizeWhatsAppPhoneVerificationRestartMaxAttempts(
+  value,
+  fallback = DEFAULT_WHATSAPP_PHONE_VERIFICATION_RESTART_MAX_ATTEMPTS
+) {
+  const rawValue = String(value ?? '').trim();
+  const numeric = Number(rawValue);
+  if (!rawValue || !Number.isFinite(numeric)) {
+    return Math.min(
+      WHATSAPP_PHONE_VERIFICATION_RESTART_LIMIT_MAX,
+      Math.max(
+        WHATSAPP_PHONE_VERIFICATION_RESTART_LIMIT_MIN,
+        Math.floor(Number(fallback) || DEFAULT_WHATSAPP_PHONE_VERIFICATION_RESTART_MAX_ATTEMPTS)
+      )
+    );
+  }
+  return Math.min(
+    WHATSAPP_PHONE_VERIFICATION_RESTART_LIMIT_MAX,
+    Math.max(WHATSAPP_PHONE_VERIFICATION_RESTART_LIMIT_MIN, Math.floor(numeric))
   );
 }
 
@@ -1725,6 +1949,15 @@ function normalizePhoneCodePollMaxRounds(value, fallback = DEFAULT_PHONE_CODE_PO
   return Math.min(
     PHONE_CODE_POLL_ROUNDS_MAX,
     Math.max(PHONE_CODE_POLL_ROUNDS_MIN, Math.floor(numeric))
+  );
+}
+
+function normalizePhoneActivationRetryRounds(value, fallback = DEFAULT_PHONE_ACTIVATION_RETRY_ROUNDS) {
+  return normalizeBoundedIntegerSetting(
+    value,
+    fallback,
+    PHONE_ACTIVATION_RETRY_ROUNDS_MIN,
+    PHONE_ACTIVATION_RETRY_ROUNDS_MAX
   );
 }
 
@@ -2082,15 +2315,7 @@ async function ensureResolvedSignupMethodForRun(options = {}) {
 }
 
 function normalizePlusPaymentMethod(value = '') {
-  const rootScope = typeof self !== 'undefined' ? self : globalThis;
-  if (rootScope.GoPayUtils?.normalizePlusPaymentMethod) {
-    return rootScope.GoPayUtils.normalizePlusPaymentMethod(value);
-  }
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === PLUS_PAYMENT_METHOD_GPC_HELPER) {
-    return PLUS_PAYMENT_METHOD_GPC_HELPER;
-  }
-  return normalized === PLUS_PAYMENT_METHOD_GOPAY ? PLUS_PAYMENT_METHOD_GOPAY : PLUS_PAYMENT_METHOD_PAYPAL;
+  return PLUS_PAYMENT_METHOD_PAYPAL;
 }
 
 function normalizeFiveSimCountryId(value, fallback = FIVE_SIM_COUNTRY_ID) {
@@ -2543,7 +2768,9 @@ function normalizeEmailGenerator(value = '') {
   }
   if (normalized === 'cloudflare') return 'cloudflare';
   if (normalized === CLOUDFLARE_TEMP_EMAIL_GENERATOR) return CLOUDFLARE_TEMP_EMAIL_GENERATOR;
-  if (normalized === 'cloudmail') return 'cloudmail';
+  if (normalized === CLOUD_MAIL_GENERATOR) return CLOUD_MAIL_GENERATOR;
+  if (normalized === FREEMAIL_GENERATOR) return FREEMAIL_GENERATOR;
+  if (normalized === OUTLOOK_EMAIL_PLUS_GENERATOR) return OUTLOOK_EMAIL_PLUS_GENERATOR;
   return 'duck';
 }
 
@@ -2558,7 +2785,7 @@ function normalizeCustomEmailPool(value = []) {
     : String(value || '').split(/[\r\n,，;；]+/);
 
   return source
-    .map((item) => String(item || '').trim().toLowerCase())
+    .map((item) => parseHiddenEmailCredential(item).email)
     .filter((item) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item));
 }
 
@@ -2571,7 +2798,8 @@ function normalizeCustomEmailPoolEntryObjects(value = []) {
     const asObject = rawEntry && typeof rawEntry === 'object'
       ? rawEntry
       : { email: rawEntry };
-    const email = String(asObject.email || '').trim().toLowerCase();
+    const parsedCredential = parseHiddenEmailCredential(asObject.credential || asObject.email || '');
+    const email = parsedCredential.email;
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       continue;
     }
@@ -2582,6 +2810,7 @@ function normalizeCustomEmailPoolEntryObjects(value = []) {
     entries.push({
       id: String(asObject.id || `custom-pool-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`),
       email,
+      credential: parsedCredential.credential || String(asObject.credential || '').trim(),
       enabled: asObject.enabled !== undefined ? Boolean(asObject.enabled) : true,
       used: Boolean(asObject.used),
       note: String(asObject.note || '').trim(),
@@ -2627,6 +2856,13 @@ function getCustomEmailPoolEntries(state = {}) {
     note: '',
     lastUsedAt: 0,
   }));
+}
+
+function getCustomEmailPoolCredentialForEmail(state = {}, email = '') {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return '';
+  const entry = getCustomEmailPoolEntries(state).find((item) => item.email === normalizedEmail);
+  return String(entry?.credential || '').trim();
 }
 
 async function markCurrentCustomEmailPoolEntryUsed(state = {}, options = {}) {
@@ -2766,6 +3002,13 @@ async function markCurrentRegistrationAccountUsed(state = {}, options = {}) {
   const icloudResult = await finalizeIcloudAliasAfterSuccessfulFlow(latestState);
   updated = Boolean(icloudResult?.handled) || updated;
 
+  const outlookEmailPlusResult = await markCurrentOutlookEmailPlusAliasUsed(latestState, {
+    logPrefix: reasonPrefix,
+    level: options.level || 'warn',
+    result: 'success',
+  });
+  updated = Boolean(outlookEmailPlusResult?.handled) || updated;
+
   if (typeof markCurrentCustomEmailPoolEntryUsed === 'function') {
     const result = await markCurrentCustomEmailPoolEntryUsed(latestState, {
       logPrefix: `${reasonPrefix}：自定义邮箱池`,
@@ -2870,6 +3113,13 @@ async function markCurrentRegistrationAccountUnavailable(state = {}, options = {
     updated = true;
   }
 
+  const outlookEmailPlusResult = await markCurrentOutlookEmailPlusAliasUsed(latestState, {
+    logPrefix: reasonPrefix,
+    level: options.level || 'warn',
+    result: reasonCode,
+  });
+  updated = Boolean(outlookEmailPlusResult?.handled) || updated;
+
   if (typeof markCurrentCustomEmailPoolEntryUsed === 'function') {
     const result = await markCurrentCustomEmailPoolEntryUsed(latestState, {
       logPrefix: `${reasonPrefix}：自定义邮箱池`,
@@ -2878,7 +3128,63 @@ async function markCurrentRegistrationAccountUnavailable(state = {}, options = {
     updated = Boolean(result?.updated) || updated;
   }
 
+  const cleared = await clearCurrentRegistrationEmailRuntimeState(latestState, {
+    reason: reasonCode,
+    reasonLabel,
+  });
+  updated = Boolean(cleared?.updated) || updated;
+
   return { updated };
+}
+
+async function clearCurrentRegistrationEmailRuntimeState(state = {}, options = {}) {
+  const currentState = await getState();
+  const latestState = {
+    ...(state && typeof state === 'object' ? state : {}),
+    ...(currentState && typeof currentState === 'object' ? currentState : {}),
+  };
+  const currentEmail = String(
+    latestState.email
+    || latestState.registrationEmailState?.current
+    || latestState.step8VerificationTargetEmail
+    || ''
+  ).trim();
+  const normalizedCurrentEmail = currentEmail.toLowerCase();
+  const preserveAccountIdentity = Boolean(getPreservedPhoneIdentity(latestState));
+  const updates = buildClearedRegistrationEmailStateUpdates(latestState, {
+    preservePrevious: true,
+    preserveAccountIdentity,
+    source: `invalidated:${String(options?.reason || '').trim() || 'identity_conflict'}`,
+  });
+
+  if (!preserveAccountIdentity && String(latestState?.accountIdentifierType || '').trim().toLowerCase() === 'email') {
+    updates.accountIdentifierType = null;
+    updates.accountIdentifier = '';
+  }
+
+  updates.lastEmailTimestamp = null;
+  updates.lastSignupCode = null;
+  updates.lastLoginCode = null;
+  updates.signupVerificationRequestedAt = null;
+  updates.loginVerificationRequestedAt = null;
+  updates.step8VerificationTargetEmail = '';
+  if (latestState.bindEmailSubmitted || String(latestState.step8VerificationTargetEmail || '').trim()) {
+    updates.bindEmailSubmitted = false;
+  }
+
+  const normalizedBoundEmail = String(latestState?.boundEmail || '').trim().toLowerCase();
+  if (normalizedCurrentEmail && normalizedBoundEmail === normalizedCurrentEmail) {
+    updates.boundEmail = '';
+    updates.bindEmailSubmitted = false;
+  }
+
+  if (!statePatchHasChanges(latestState, updates)) {
+    return { updated: false };
+  }
+
+  await setState(updates);
+  broadcastDataUpdate(updates);
+  return { updated: true, updates };
 }
 
 function getCustomEmailPoolEmailForRun(state = {}, targetRun = 1) {
@@ -2962,11 +3268,14 @@ function normalizeMailProvider(value = '') {
   switch (normalized) {
     case 'custom':
     case ICLOUD_PROVIDER:
+    case ICLOUD_API_PROVIDER:
     case GMAIL_PROVIDER:
     case HOTMAIL_PROVIDER:
     case LUCKMAIL_PROVIDER:
     case CLOUDFLARE_TEMP_EMAIL_PROVIDER:
     case CLOUD_MAIL_PROVIDER:
+    case FREEMAIL_PROVIDER:
+    case OUTLOOK_EMAIL_PLUS_PROVIDER:
     case '163':
     case '163-vip':
     case '126':
@@ -3204,6 +3513,73 @@ const {
   pollCloudMailVerificationCode,
   resolveCloudMailPollTargetEmail,
 } = cloudMailProvider;
+const freemailProvider = self.MultiPageBackgroundFreemailProvider.createFreemailProvider({
+  addLog,
+  buildFreemailHeaders,
+  fetchImpl: typeof fetch === 'function' ? fetch.bind(globalThis) : null,
+  FREEMAIL_DEFAULT_PAGE_SIZE,
+  FREEMAIL_GENERATOR,
+  FREEMAIL_PROVIDER,
+  getFreemailAddressFromResponse,
+  getState,
+  joinFreemailUrl,
+  normalizeFreemailAddress,
+  normalizeFreemailBaseUrl,
+  normalizeFreemailDomain,
+  normalizeFreemailDomains,
+  normalizeFreemailMessages,
+  persistRegistrationEmailState,
+  pickVerificationMessageWithTimeFallback,
+  setEmailState,
+  setPersistentSettings,
+  sleepWithStop,
+  throwIfStopped,
+});
+const {
+  getFreemailConfig,
+  normalizeFreemailReceiveMailbox,
+  fetchFreemailAddress,
+  pollFreemailVerificationCode,
+  resolveFreemailPollTargetEmail,
+} = freemailProvider;
+const outlookEmailPlusProvider = self.MultiPageBackgroundOutlookEmailPlusProvider.createOutlookEmailPlusProvider({
+  addLog,
+  broadcastDataUpdate,
+  buildOutlookEmailPlusAliasAddress,
+  buildOutlookEmailPlusHeaders,
+  buildOutlookEmailPlusPayPalAliasAddress,
+  deriveOutlookEmailPlusBaseAddress,
+  generateOutlookEmailPlusTag,
+  getOutlookEmailPlusPayPalAliasIndex,
+  isOutlookEmailPlusTaggedAlias,
+  joinOutlookEmailPlusUrl,
+  normalizeOutlookEmailPlusAddress,
+  normalizeOutlookEmailPlusBaseUrl,
+  normalizeOutlookEmailPlusCallerIdPrefix,
+  normalizeOutlookEmailPlusClaim,
+  normalizeOutlookEmailPlusProjectKey,
+  normalizeOutlookEmailPlusProvider,
+  normalizeOutlookEmailPlusVerificationCode,
+  normalizeHotmailAliasUsage,
+  OUTLOOK_EMAIL_PLUS_GENERATOR,
+  OUTLOOK_EMAIL_PLUS_PROVIDER,
+  getState,
+  persistRegistrationEmailState,
+  setEmailState,
+  setPersistentSettings,
+  setState,
+  sleepWithStop,
+  throwIfStopped,
+  unwrapOutlookEmailPlusResponse,
+});
+const {
+  claimOutlookEmailPlusAddress,
+  completeOutlookEmailPlusClaim,
+  getOutlookEmailPlusConfig,
+  markOutlookEmailPlusAliasUsed,
+  pollOutlookEmailPlusVerificationCode,
+  releaseOutlookEmailPlusClaim,
+} = outlookEmailPlusProvider;
 
 function normalizeSub2ApiGroupNames(value = '') {
   const source = Array.isArray(value)
@@ -3335,6 +3711,10 @@ function normalizePersistentSettingValue(key, value) {
       return normalizePlusPaymentMethod(value);
     case 'plusAccountAccessStrategy':
       return normalizePlusAccountAccessStrategy(value);
+    case 'plusCheckoutMode':
+      return normalizePlusCheckoutMode(value);
+    case 'plusCheckoutProfiles':
+      return normalizePlusCheckoutProfiles(value || {});
     case 'plusHostedCheckoutOauthDelaySeconds':
       return normalizePlusHostedCheckoutOauthDelaySeconds(
         value,
@@ -3610,6 +3990,8 @@ function normalizePersistentSettingValue(key, value) {
     case 'step6CookieCleanupEnabled':
     case 'phoneVerificationEnabled':
     case 'phoneSignupReloginAfterBindEmailEnabled':
+    case 'whatsappPhoneVerificationRestartEnabled':
+    case 'phoneAutoReleaseOnStopEnabled':
     case 'phoneSmsReuseEnabled':
     case 'freePhoneReuseEnabled':
     case 'freePhoneReuseAutoEnabled':
@@ -3629,6 +4011,11 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeVerificationResendCount(value, DEFAULT_VERIFICATION_RESEND_COUNT);
     case 'phoneVerificationReplacementLimit':
       return normalizePhoneVerificationReplacementLimit(value, DEFAULT_PHONE_VERIFICATION_REPLACEMENT_LIMIT);
+    case 'whatsappPhoneVerificationRestartMaxAttempts':
+      return normalizeWhatsAppPhoneVerificationRestartMaxAttempts(
+        value,
+        DEFAULT_WHATSAPP_PHONE_VERIFICATION_RESTART_MAX_ATTEMPTS
+      );
     case 'phoneCodeWaitSeconds':
       return normalizePhoneCodeWaitSeconds(value, DEFAULT_PHONE_CODE_WAIT_SECONDS);
     case 'phoneCodeTimeoutWindows':
@@ -3637,6 +4024,8 @@ function normalizePersistentSettingValue(key, value) {
       return normalizePhoneCodePollIntervalSeconds(value, DEFAULT_PHONE_CODE_POLL_INTERVAL_SECONDS);
     case 'phoneCodePollMaxRounds':
       return normalizePhoneCodePollMaxRounds(value, DEFAULT_PHONE_CODE_POLL_ROUNDS);
+    case 'heroSmsActivationRetryRounds':
+      return normalizePhoneActivationRetryRounds(value, DEFAULT_PHONE_ACTIVATION_RETRY_ROUNDS);
     case 'mailProvider':
       {
         const normalizedMailProvider = normalizeMailProvider(value);
@@ -3645,6 +4034,12 @@ function normalizePersistentSettingValue(key, value) {
         }
         if (normalizedMailProvider === CLOUD_MAIL_PROVIDER) {
           return CLOUD_MAIL_PROVIDER;
+        }
+        if (normalizedMailProvider === FREEMAIL_PROVIDER) {
+          return FREEMAIL_PROVIDER;
+        }
+        if (normalizedMailProvider === ICLOUD_PROVIDER || normalizedMailProvider === ICLOUD_API_PROVIDER) {
+          return normalizedMailProvider;
         }
         return HOTMAIL_PROVIDER;
       }
@@ -3669,6 +4064,10 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeIcloudTargetMailboxType(value);
     case 'icloudForwardMailProvider':
       return normalizeIcloudForwardMailProvider(value);
+    case 'icloudApiBaseUrl':
+      return normalizeIcloudApiBaseUrl(value);
+    case 'icloudApiAdminKey':
+      return String(value || '');
     case 'icloudFetchMode':
       return normalizeIcloudFetchMode(value);
     case 'accountRunHistoryHelperBaseUrl':
@@ -3736,6 +4135,31 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeCloudMailDomain(value);
     case 'cloudMailDomains':
       return normalizeCloudMailDomains(value);
+    case 'freemailBaseUrl':
+      return normalizeFreemailBaseUrl(value);
+    case 'freemailAdminUsername':
+      return String(value || '').trim();
+    case 'freemailAdminPassword':
+      return String(value || '');
+    case 'freemailDomain':
+      return normalizeFreemailDomain(value);
+    case 'freemailDomains':
+      return normalizeFreemailDomains(value);
+    case 'outlookEmailPlusBaseUrl':
+      return normalizeOutlookEmailPlusBaseUrl(value);
+    case 'outlookEmailPlusApiKey':
+      return String(value || '').trim();
+    case 'outlookEmailPlusProvider':
+      return normalizeOutlookEmailPlusProvider(value) || PERSISTED_SETTING_DEFAULTS.outlookEmailPlusProvider;
+    case 'outlookEmailPlusProjectKey':
+      return normalizeOutlookEmailPlusProjectKey(value) || PERSISTED_SETTING_DEFAULTS.outlookEmailPlusProjectKey;
+    case 'outlookEmailPlusCallerIdPrefix':
+      return normalizeOutlookEmailPlusCallerIdPrefix(value) || PERSISTED_SETTING_DEFAULTS.outlookEmailPlusCallerIdPrefix;
+    case 'outlookEmailPlusAliasMaxPerMailbox':
+      return normalizeOutlookEmailPlusAliasMaxPerMailbox(
+        value,
+        PERSISTED_SETTING_DEFAULTS.outlookEmailPlusAliasMaxPerMailbox
+      );
     case 'hotmailAccounts':
       return normalizeHotmailAccounts(value);
     case 'hotmailAliasEnabled':
@@ -3943,6 +4367,16 @@ function buildPersistentSettingsPayload(input = {}, options = {}) {
     payload.heroSmsReuseEnabled = normalizedReuseEnabled;
   }
 
+  const effectivePhoneSmsProvider = normalizePhoneSmsProvider(
+    Object.prototype.hasOwnProperty.call(payload, 'phoneSmsProvider')
+      ? payload.phoneSmsProvider
+      : normalizedInput.phoneSmsProvider
+  );
+  if (effectivePhoneSmsProvider === PHONE_SMS_PROVIDER_SMSBOWER) {
+    payload.phoneSmsReuseEnabled = false;
+    payload.heroSmsReuseEnabled = false;
+  }
+
   if (requireKnownKeys && matchedKeyCount === 0) {
     throw new Error('\u914d\u7f6e\u6587\u4ef6\u4e2d\u6ca1\u6709\u53ef\u8bc6\u522b\u7684\u914d\u7f6e\u5185\u5bb9\u3002');
   }
@@ -4019,6 +4453,21 @@ function buildPersistentSettingsPayload(input = {}, options = {}) {
     payload.ipProxyUsername = String(activeProfile?.username || payload.ipProxyUsername || '').trim();
     payload.ipProxyPassword = String(activeProfile?.password || payload.ipProxyPassword || '');
     payload.ipProxyRegion = String(activeProfile?.region || payload.ipProxyRegion || '').trim();
+  }
+
+  const hasPlusCheckoutProfileUpdates = fillDefaults
+    || Object.prototype.hasOwnProperty.call(normalizedInput, 'plusCheckoutMode')
+    || Object.prototype.hasOwnProperty.call(normalizedInput, 'plusCheckoutProfiles')
+    || PLUS_CHECKOUT_PROFILE_SETTING_KEYS.some((key) => (
+      Object.prototype.hasOwnProperty.call(normalizedInput, key)
+      || Object.prototype.hasOwnProperty.call(payload, key)
+    ));
+  if (hasPlusCheckoutProfileUpdates) {
+    Object.assign(payload, applyActivePlusCheckoutProfileToState({
+      ...PERSISTED_SETTING_DEFAULTS,
+      ...normalizedInput,
+      ...payload,
+    }));
   }
 
   return payload;
@@ -4113,11 +4562,23 @@ async function setState(updates) {
       await chrome.storage.local.set(persistentAliasUpdates);
     }
     if (Object.prototype.hasOwnProperty.call(sessionUpdates, 'hostedCheckoutSmsPoolUsage')) {
-      await chrome.storage.local.set({
+      const persistedCheckoutProfileState = await chrome.storage.local.get([
+        'plusCheckoutMode',
+        'plusCheckoutProfiles',
+        ...PLUS_CHECKOUT_PROFILE_SETTING_KEYS,
+      ]).catch(() => ({}));
+      const nextPersistedState = applyActivePlusCheckoutProfileToState({
+        ...PERSISTED_SETTING_DEFAULTS,
+        ...persistedCheckoutProfileState,
         hostedCheckoutSmsPoolUsage: normalizePersistentSettingValue(
           'hostedCheckoutSmsPoolUsage',
           sessionUpdates.hostedCheckoutSmsPoolUsage
         ),
+      });
+      await chrome.storage.local.set({
+        plusCheckoutMode: nextPersistedState.plusCheckoutMode,
+        plusCheckoutProfiles: nextPersistedState.plusCheckoutProfiles,
+        hostedCheckoutSmsPoolUsage: nextPersistedState.hostedCheckoutSmsPoolUsage,
       });
     }
   }
@@ -5250,6 +5711,164 @@ function isLuckmailProvider(stateOrProvider) {
   return provider === LUCKMAIL_PROVIDER;
 }
 
+function isOutlookEmailPlusProvider(stateOrProvider) {
+  const provider = typeof stateOrProvider === 'string'
+    ? stateOrProvider
+    : stateOrProvider?.mailProvider;
+  return provider === OUTLOOK_EMAIL_PLUS_PROVIDER;
+}
+
+function hasCurrentOutlookEmailPlusClaim(state = {}) {
+  return isOutlookEmailPlusProvider(state)
+    && Boolean(state.currentOutlookEmailPlusClaim?.address || state.currentOutlookEmailPlusClaim?.accountId);
+}
+
+function getOutlookEmailPlusClaimIdentity(claim = {}) {
+  return String(claim?.taskId || claim?.accountId || claim?.address || '')
+    .trim()
+    .toLowerCase();
+}
+
+function isSameOutlookEmailPlusClaim(left = {}, right = {}) {
+  const leftIdentity = getOutlookEmailPlusClaimIdentity(left);
+  const rightIdentity = getOutlookEmailPlusClaimIdentity(right);
+  return Boolean(leftIdentity && rightIdentity && leftIdentity === rightIdentity);
+}
+
+async function completeCurrentOutlookEmailPlusClaim(state = {}, options = {}) {
+  if (!hasCurrentOutlookEmailPlusClaim(state) || typeof completeOutlookEmailPlusClaim !== 'function') {
+    return { handled: false, reason: 'missing_claim' };
+  }
+  try {
+    const result = await completeOutlookEmailPlusClaim(state, {
+      result: options.result || 'success',
+    });
+    if (result?.completed) {
+      const logPrefix = String(options.logPrefix || '').trim() || 'Outlook Email Plus';
+      await addLog(`${logPrefix}：Outlook Email Plus 邮箱认领已完成。`, options.level || 'ok');
+      return { handled: true, result };
+    }
+    if (result?.reason === 'missing_claim_token') {
+      const refreshedState = await getState();
+      if (isSameOutlookEmailPlusClaim(state.currentOutlookEmailPlusClaim, refreshedState.currentOutlookEmailPlusClaim)) {
+        await addLog('Outlook Email Plus：缺少认领令牌，无法通知服务端完成认领，可能是扩展后台已重启。', 'warn');
+      }
+    }
+    return { handled: false, result };
+  } catch (error) {
+    await addLog(`Outlook Email Plus：完成认领回调失败：${error?.message || error}`, 'warn');
+    return { handled: false, error };
+  }
+}
+
+async function markCurrentOutlookEmailPlusAliasUsed(state = {}, options = {}) {
+  if (!hasCurrentOutlookEmailPlusClaim(state) || typeof markOutlookEmailPlusAliasUsed !== 'function') {
+    return { handled: false, reason: 'missing_claim' };
+  }
+  const logPrefix = String(options.logPrefix || '').trim() || 'Outlook Email Plus';
+  try {
+    const result = await markOutlookEmailPlusAliasUsed(state);
+    if (!result?.handled) {
+      return { handled: false, result };
+    }
+    if (!result.alreadyUsed) {
+      await addLog(
+        `${logPrefix}：Outlook Email Plus 别名 ${result.registrationEmail || ''} 已标记为已用（${result.aliasIndex}/${result.aliasMax}）。`,
+        options.level || 'warn'
+      );
+    }
+    if (result.exhausted) {
+      const completion = await completeCurrentOutlookEmailPlusClaim(state, {
+        logPrefix,
+        level: options.level,
+        result: options.result || 'success',
+      });
+      return {
+        handled: true,
+        result,
+        completion,
+        exhausted: true,
+      };
+    }
+    if (!result.alreadyUsed) {
+      await addLog(`${logPrefix}：当前 Outlook Email Plus 邮箱还可继续分配后续别名。`, 'info');
+    }
+    return {
+      handled: true,
+      result,
+      exhausted: false,
+    };
+  } catch (error) {
+    await addLog(`Outlook Email Plus：标记别名已用失败：${error?.message || error}`, 'warn');
+    return { handled: false, error };
+  }
+}
+
+async function releaseCurrentOutlookEmailPlusClaim(state = {}, options = {}) {
+  if (!hasCurrentOutlookEmailPlusClaim(state) || typeof releaseOutlookEmailPlusClaim !== 'function') {
+    return { handled: false, reason: 'missing_claim' };
+  }
+  try {
+    const result = await releaseOutlookEmailPlusClaim(state, {
+      reason: options.reason || 'flow_abandoned',
+    });
+    if (result?.released) {
+      return { handled: true, result };
+    }
+    if (result?.reason === 'missing_claim_token') {
+      const refreshedState = await getState();
+      if (isSameOutlookEmailPlusClaim(state.currentOutlookEmailPlusClaim, refreshedState.currentOutlookEmailPlusClaim)) {
+        await addLog('Outlook Email Plus：缺少认领令牌，无法通知服务端释放认领，可能是扩展后台已重启。', 'warn');
+      }
+    }
+    return { handled: false, result };
+  } catch (error) {
+    await addLog(`Outlook Email Plus：释放认领回调失败：${error?.message || error}`, 'warn');
+    return { handled: false, error };
+  }
+}
+
+function getOutlookEmailPlusLifecycleAction(status = '') {
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  if (normalizedStatus === 'success') {
+    return 'complete';
+  }
+  if (
+    normalizedStatus === 'failed'
+    || normalizedStatus === 'stopped'
+    || normalizedStatus.includes(':failed')
+    || normalizedStatus.includes(':stopped')
+    || normalizedStatus.endsWith('_failed')
+    || normalizedStatus.endsWith('_stopped')
+  ) {
+    return 'release';
+  }
+  return '';
+}
+
+async function finalizeOutlookEmailPlusClaimForAccountRunRecord(status, state = {}, reason = '') {
+  const action = getOutlookEmailPlusLifecycleAction(status);
+  if (!action || !hasCurrentOutlookEmailPlusClaim(state)) {
+    return { handled: false };
+  }
+  if (action === 'release' && isRegistrationIdentityConflictFailure(reason)) {
+    const conflictResult = isStep8EmailInUseFailure(reason) ? 'email_in_use' : 'user_already_exists';
+    return markCurrentOutlookEmailPlusAliasUsed(state, {
+      logPrefix: '流程失败',
+      result: conflictResult,
+    });
+  }
+  if (action === 'complete') {
+    return markCurrentOutlookEmailPlusAliasUsed(state, {
+      logPrefix: '流程完成',
+      result: 'success',
+    });
+  }
+  return releaseCurrentOutlookEmailPlusClaim(state, {
+    reason: String(reason || status || 'flow_abandoned').trim() || 'flow_abandoned',
+  });
+}
+
 function isCustomMailProvider(stateOrProvider) {
   const provider = typeof stateOrProvider === 'string'
     ? stateOrProvider
@@ -6086,6 +6705,69 @@ async function pollHotmailVerificationCode(step, state, pollPayload = {}) {
   }
 
   throw lastError || new Error(`步骤 ${step}：未在 Hotmail 收件箱中找到新的匹配验证码。`);
+}
+
+async function pollIcloudApiVerificationCode(step, state, pollPayload = {}) {
+  const baseUrl = normalizeIcloudApiBaseUrl(state?.icloudApiBaseUrl);
+  const adminKey = String(state?.icloudApiAdminKey || '');
+  const targetEmail = String(pollPayload?.targetEmail || state?.email || '').trim().toLowerCase();
+  const credential = getCustomEmailPoolCredentialForEmail(state, targetEmail) || targetEmail;
+  const endpoint = buildIcloudApiEndpoint(baseUrl);
+
+  if (!endpoint) {
+    throw new Error('iCloud API 地址为空，请在侧栏配置 Worker 地址。');
+  }
+  if (!adminKey) {
+    throw new Error('iCloud API 管理员密码为空，请在侧栏配置管理员密码。');
+  }
+  if (!credential || !credential.includes('----')) {
+    throw new Error('当前邮箱缺少隐藏邮箱凭据，请在自定义邮箱池导入“隐藏邮箱地址----密钥”。');
+  }
+
+  const maxAttempts = Number(pollPayload.maxAttempts) || 5;
+  const intervalMs = Number(pollPayload.intervalMs) || 3000;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    throwIfStopped();
+    try {
+      await addLog(`步骤 ${step}：正在通过 iCloud API 获取验证码（${attempt}/${maxAttempts}）...`, 'info');
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminKey,
+          credential,
+          codePatterns: pollPayload.codePatterns || [],
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || `HTTP ${response.status}`);
+      }
+      if (payload?.code) {
+        await addLog(`步骤 ${step}：已通过 iCloud API 找到验证码：${payload.code}`, 'ok');
+        return {
+          ok: true,
+          code: String(payload.code),
+          emailTimestamp: Date.now(),
+          mailId: payload?.mail?.id || '',
+        };
+      }
+
+      lastError = new Error(`步骤 ${step}：iCloud API 暂未返回验证码（${attempt}/${maxAttempts}）。`);
+      await addLog(lastError.message, attempt === maxAttempts ? 'warn' : 'info');
+    } catch (error) {
+      lastError = error;
+      await addLog(`步骤 ${step}：iCloud API 查询失败：${error.message}`, 'warn');
+    }
+
+    if (attempt < maxAttempts) {
+      await sleepWithStop(intervalMs);
+    }
+  }
+
+  throw lastError || new Error(`步骤 ${step}：iCloud API 未返回验证码。`);
 }
 
 function generateRandomSuffix(length = 6) {
@@ -8844,6 +9526,100 @@ function inferHeroSmsCountryFromPhoneNumber(phoneNumber = '') {
   };
 }
 
+function inferFiveSimCountryFromPhoneNumber(phoneNumber = '') {
+  const heroCountry = inferHeroSmsCountryFromPhoneNumber(phoneNumber);
+  if (!heroCountry) {
+    return null;
+  }
+  const labelText = String(heroCountry.label || '').trim().toLowerCase();
+  const countryId = (
+    labelText.includes('indonesia') || labelText.includes('印度尼西亚') || labelText.includes('印尼')
+  ) ? 'indonesia'
+    : (
+      labelText.includes('thailand') || labelText.includes('泰国')
+    ) ? 'thailand'
+      : (
+        labelText.includes('united kingdom') || labelText.includes('england') || labelText.includes('uk') || labelText.includes('英国')
+      ) ? 'england'
+        : (
+          labelText.includes('united states') || labelText.includes('usa') || labelText.includes('america') || labelText.includes('美国')
+        ) ? 'usa'
+          : (
+            labelText.includes('japan') || labelText.includes('日本')
+          ) ? 'japan'
+            : (
+              labelText.includes('germany') || labelText.includes('德国')
+            ) ? 'germany'
+              : (
+                labelText.includes('vietnam') || labelText.includes('越南')
+              ) ? 'vietnam'
+                : '';
+  const normalizedCountryId = normalizeFiveSimCountryId(countryId, '');
+  if (!normalizedCountryId) {
+    return null;
+  }
+  return {
+    id: normalizedCountryId,
+    label: normalizeFiveSimCountryLabel(normalizedCountryId, normalizedCountryId),
+  };
+}
+
+function supportsPhoneActivationReuseProvider(providerId = '') {
+  const normalizedProvider = normalizePhoneSmsProvider(providerId);
+  const rootScope = typeof self !== 'undefined' ? self : globalThis;
+  if (rootScope.PhoneSmsProviderRegistry?.supportsActivationReuse) {
+    return Boolean(rootScope.PhoneSmsProviderRegistry.supportsActivationReuse(normalizedProvider));
+  }
+  return normalizedProvider === PHONE_SMS_PROVIDER_HERO
+    || normalizedProvider === PHONE_SMS_PROVIDER_5SIM
+    || normalizedProvider === PHONE_SMS_PROVIDER_SMSPOOL;
+}
+
+function supportsFreePhoneReuseProvider(providerId = '') {
+  const normalizedProvider = normalizePhoneSmsProvider(providerId);
+  const rootScope = typeof self !== 'undefined' ? self : globalThis;
+  if (rootScope.PhoneSmsProviderRegistry?.supportsFreePhoneReuse) {
+    return Boolean(rootScope.PhoneSmsProviderRegistry.supportsFreePhoneReuse(normalizedProvider));
+  }
+  return normalizedProvider === PHONE_SMS_PROVIDER_HERO
+    || normalizedProvider === PHONE_SMS_PROVIDER_5SIM
+    || normalizedProvider === PHONE_SMS_PROVIDER_SMSBOWER
+    || normalizedProvider === PHONE_SMS_PROVIDER_SMSPOOL;
+}
+
+function getPhoneDefaultServiceCodeByProvider(providerId = '') {
+  const normalizedProvider = normalizePhoneSmsProvider(providerId);
+  if (normalizedProvider === PHONE_SMS_PROVIDER_5SIM) {
+    return DEFAULT_FIVE_SIM_PRODUCT;
+  }
+  if (normalizedProvider === PHONE_SMS_PROVIDER_SMSPOOL) {
+    return DEFAULT_SMSPOOL_SERVICE_CODE;
+  }
+  return HERO_SMS_SERVICE_CODE;
+}
+
+function getFreeReuseEligibilityForStoredActivation(activation) {
+  if (!activation || typeof activation !== 'object' || Array.isArray(activation)) {
+    return { ok: false, reason: 'activation_missing', message: '接码订单无效。' };
+  }
+  const provider = normalizePhoneSmsProvider(activation.provider || PHONE_SMS_PROVIDER_HERO);
+  if (!supportsFreePhoneReuseProvider(provider)) {
+    return {
+      ok: false,
+      reason: 'provider_not_supported',
+      message: '当前接码服务商不支持白嫖复用。',
+    };
+  }
+  if (provider === PHONE_SMS_PROVIDER_SMSBOWER && activation.canGetAnotherSms === false) {
+    return {
+      ok: false,
+      reason: 'smsbower_no_additional_sms',
+      message: `SMSBower 号码 ${activation.phoneNumber || ''} 不支持白嫖复用：接口返回 canGetAnotherSms=false，平台不允许继续请求下一条短信。`,
+    };
+  }
+  return { ok: true, reason: '', message: '' };
+}
+
 function normalizePhoneDigits(value = '') {
   return String(value || '').replace(/\D+/g, '');
 }
@@ -8854,7 +9630,7 @@ function phoneNumbersMatch(left = '', right = '') {
   return Boolean(leftDigits && rightDigits && leftDigits === rightDigits);
 }
 
-function normalizeLocalHeroSmsActivation(record) {
+function normalizeLocalReusablePhoneActivation(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
     return null;
   }
@@ -8865,27 +9641,29 @@ function normalizeLocalHeroSmsActivation(record) {
   }
   const rawProvider = String(record.provider ?? record.smsProvider ?? '').trim();
   const provider = rawProvider ? normalizePhoneSmsProvider(rawProvider) : PHONE_SMS_PROVIDER_HERO;
-  if (provider !== PHONE_SMS_PROVIDER_HERO) {
+  if (!supportsFreePhoneReuseProvider(provider)) {
     return null;
   }
-  const countryId = Math.max(
-    0,
-    Math.floor(Number(record.countryId ?? record.country ?? record.countryCode) || 0)
-  );
+  const countryId = provider === PHONE_SMS_PROVIDER_5SIM
+    ? normalizeFiveSimCountryId(record.countryCode ?? record.countryId ?? record.country, '')
+    : Math.max(0, Math.floor(Number(record.countryId ?? record.country ?? record.countryCode) || 0));
   const countryLabel = String(record.countryLabel || record.label || '').trim();
-  const serviceCode = String(record.serviceCode || record.service || HERO_SMS_SERVICE_CODE).trim() || HERO_SMS_SERVICE_CODE;
+  const serviceCode = String(record.serviceCode || record.service || getPhoneDefaultServiceCodeByProvider(provider)).trim()
+    || getPhoneDefaultServiceCodeByProvider(provider);
   return {
     ...record,
-    provider: PHONE_SMS_PROVIDER_HERO,
+    provider,
     activationId,
     phoneNumber,
     serviceCode,
     ...(countryId > 0 ? { countryId } : {}),
+    ...(provider === PHONE_SMS_PROVIDER_5SIM && countryId ? { countryCode: countryId } : {}),
     ...(countryLabel ? { countryLabel } : {}),
   };
 }
 
-function findLocalHeroSmsActivationForPhone(state = {}, phoneNumber = '') {
+function findLocalReusablePhoneActivationForPhone(state = {}, phoneNumber = '', providerId = '') {
+  const normalizedProvider = providerId ? normalizePhoneSmsProvider(providerId) : '';
   const candidates = [
     state.currentPhoneActivation,
     state.reusablePhoneActivation,
@@ -8899,8 +9677,12 @@ function findLocalHeroSmsActivationForPhone(state = {}, phoneNumber = '') {
     candidates.push(...state.phoneReusableActivationPool);
   }
   for (const candidate of candidates) {
-    const normalized = normalizeLocalHeroSmsActivation(candidate);
-    if (normalized && phoneNumbersMatch(normalized.phoneNumber, phoneNumber)) {
+    const normalized = normalizeLocalReusablePhoneActivation(candidate);
+    if (
+      normalized
+      && phoneNumbersMatch(normalized.phoneNumber, phoneNumber)
+      && (!normalizedProvider || normalized.provider === normalizedProvider)
+    ) {
       return normalized;
     }
   }
@@ -8916,7 +9698,18 @@ async function setFreeReusablePhoneActivation(record = {}) {
   if (isPhoneSignupIdentityStateForReuse(state)) {
     throw new Error('\u624b\u673a\u53f7\u6ce8\u518c\u6a21\u5f0f\u4e0b\u4e0d\u80fd\u8bb0\u5f55\u767d\u5ad6\u590d\u7528\u624b\u673a\u53f7\uff0c\u8bf7\u5207\u6362\u90ae\u7bb1\u6ce8\u518c\u540e\u518d\u4f7f\u7528\u3002');
   }
-  const localActivation = findLocalHeroSmsActivationForPhone(state, phoneNumber);
+  const requestedProvider = normalizePhoneSmsProvider(
+    record.provider || record.smsProvider || state.phoneSmsProvider || PHONE_SMS_PROVIDER_HERO
+  );
+  if (!supportsFreePhoneReuseProvider(requestedProvider)) {
+    throw new Error('当前接码服务商不支持白嫖复用。');
+  }
+  const localActivation = findLocalReusablePhoneActivationForPhone(state, phoneNumber, requestedProvider)
+    || findLocalReusablePhoneActivationForPhone(state, phoneNumber);
+  const provider = normalizePhoneSmsProvider(localActivation?.provider || requestedProvider);
+  const explicitCanGetAnotherSms = record.canGetAnotherSms !== undefined
+    ? Boolean(record.canGetAnotherSms)
+    : undefined;
   const activationId = String(
     record.activationId
     || record.id
@@ -8924,47 +9717,72 @@ async function setFreeReusablePhoneActivation(record = {}) {
     || localActivation?.activationId
     || ''
   ).trim();
-  const inferredCountry = inferHeroSmsCountryFromPhoneNumber(phoneNumber);
-  const hasExplicitCountry = Number.isFinite(Number(record.countryId)) && Number(record.countryId) > 0;
-  const countryId = Math.max(
-    1,
-    Math.floor(
-      Number(record.countryId)
-      || Number(localActivation?.countryId)
-      || Number(inferredCountry?.id)
-      || Number(state.heroSmsCountryId)
-      || HERO_SMS_COUNTRY_ID
+  const inferredCountry = provider === PHONE_SMS_PROVIDER_5SIM
+    ? inferFiveSimCountryFromPhoneNumber(phoneNumber)
+    : inferHeroSmsCountryFromPhoneNumber(phoneNumber);
+  const hasExplicitCountry = provider === PHONE_SMS_PROVIDER_5SIM
+    ? Boolean(String(record.countryCode || record.countryId || '').trim())
+    : Number.isFinite(Number(record.countryId)) && Number(record.countryId) > 0;
+  const countryId = provider === PHONE_SMS_PROVIDER_5SIM
+    ? normalizeFiveSimCountryId(
+      record.countryCode || record.countryId || localActivation?.countryId || inferredCountry?.id || state.fiveSimCountryId || FIVE_SIM_COUNTRY_ID,
+      state.fiveSimCountryId || FIVE_SIM_COUNTRY_ID
     )
-  );
-  const stateCountryLabel = Math.floor(Number(state.heroSmsCountryId) || 0) === countryId
-    ? String(state.heroSmsCountryLabel || '').trim()
-    : '';
+    : Math.max(
+      1,
+      Math.floor(
+        Number(record.countryId)
+        || Number(localActivation?.countryId)
+        || Number(inferredCountry?.id)
+        || Number(state.smsPoolCountryId && provider === PHONE_SMS_PROVIDER_SMSPOOL ? state.smsPoolCountryId : 0)
+        || Number(state.heroSmsCountryId)
+        || HERO_SMS_COUNTRY_ID
+      )
+    );
+  const stateCountryLabel = provider === PHONE_SMS_PROVIDER_5SIM
+    ? (String(state.fiveSimCountryId || '').trim() === String(countryId || '').trim()
+      ? String(state.fiveSimCountryLabel || '').trim()
+      : '')
+    : (Math.floor(Number(state.smsPoolCountryId && provider === PHONE_SMS_PROVIDER_SMSPOOL ? state.smsPoolCountryId : state.heroSmsCountryId) || 0) === Number(countryId)
+      ? String(provider === PHONE_SMS_PROVIDER_SMSPOOL ? (state.smsPoolCountryLabel || state.heroSmsCountryLabel || '') : (state.heroSmsCountryLabel || '')).trim()
+      : '');
   const countryLabel = String(
     record.countryLabel
-    || (Number(localActivation?.countryId) === countryId ? localActivation?.countryLabel : '')
-    || (!hasExplicitCountry && inferredCountry?.id === countryId ? inferredCountry.label : '')
+    || (String(localActivation?.countryId || '') === String(countryId || '') ? localActivation?.countryLabel : '')
+    || (!hasExplicitCountry && String(inferredCountry?.id || '') === String(countryId || '') ? inferredCountry.label : '')
     || stateCountryLabel
-    || (countryId === HERO_SMS_COUNTRY_ID ? HERO_SMS_COUNTRY_LABEL : `Country #${countryId}`)
+    || (provider === PHONE_SMS_PROVIDER_5SIM
+      ? normalizeFiveSimCountryLabel(countryId, countryId || FIVE_SIM_COUNTRY_LABEL)
+      : (countryId === HERO_SMS_COUNTRY_ID ? HERO_SMS_COUNTRY_LABEL : `Country #${countryId}`))
   ).trim();
   const activation = {
     ...(activationId ? { activationId } : {}),
     phoneNumber,
-    provider: PHONE_SMS_PROVIDER_HERO,
-    serviceCode: String(record.serviceCode || localActivation?.serviceCode || HERO_SMS_SERVICE_CODE).trim() || HERO_SMS_SERVICE_CODE,
+    provider,
+    serviceCode: String(record.serviceCode || localActivation?.serviceCode || getPhoneDefaultServiceCodeByProvider(provider)).trim()
+      || getPhoneDefaultServiceCodeByProvider(provider),
     countryId,
+    ...(provider === PHONE_SMS_PROVIDER_5SIM ? { countryCode: countryId } : {}),
     ...(countryLabel ? { countryLabel } : {}),
     successfulUses: Math.max(0, Math.floor(Number(record.successfulUses) || 0)),
     maxUses: Math.max(1, Math.floor(Number(record.maxUses) || 3)),
     source: 'free-manual-reuse',
     recordedAt: Date.now(),
     manualOnly: !activationId,
+    ...(explicitCanGetAnotherSms !== undefined
+      ? { canGetAnotherSms: explicitCanGetAnotherSms }
+      : (localActivation?.canGetAnotherSms !== undefined ? { canGetAnotherSms: Boolean(localActivation.canGetAnotherSms) } : {})),
   };
+  const eligibility = getFreeReuseEligibilityForStoredActivation(activation);
+  if (!eligibility.ok) {
+    throw new Error(eligibility.message || '当前号码不支持白嫖复用。');
+  }
   await setState({ freeReusablePhoneActivation: activation });
   broadcastDataUpdate({ freeReusablePhoneActivation: activation });
   await addLog(
     activationId
       ? `已手动记录白嫖复用手机号 ${phoneNumber}（#${activationId}）。`
-      : `已手动记录白嫖复用手机号 ${phoneNumber}。未填写 HeroSMS 激活 ID，仅支持手动填号复用。`,
+      : `已手动记录白嫖复用手机号 ${phoneNumber}。未填写接码激活 ID，仅支持手动填号复用。`,
     'ok'
   );
   return { ok: true, freeReusablePhoneActivation: activation };
@@ -9769,6 +10587,7 @@ function getSourceLabel(source) {
     'luckmail-api': 'LuckMail（API 购邮）',
     'cloudflare-temp-email': 'Cloudflare Temp Email',
     'cloudmail': 'Cloud Mail',
+    'freemail': 'freemail',
     'plus-checkout': 'Plus Checkout',
     'paypal-flow': 'PayPal 授权页',
     'gopay-flow': 'GoPay 授权页',
@@ -10044,6 +10863,30 @@ function getSignupPhonePasswordMismatchRestartPayload(preservedState = {}) {
   };
 }
 
+async function releaseSignupPhoneActivationBeforeRestart(state = {}, nodeId = '') {
+  const activation = state?.signupPhoneActivation;
+  if (!activation || typeof activation !== 'object' || Array.isArray(activation)) {
+    return;
+  }
+  const phoneNumber = String(activation.phoneNumber || state.signupPhoneNumber || '').trim();
+  const activationId = String(activation.activationId || activation.id || activation.activation || '').trim();
+  const identifier = phoneNumber || activationId || '当前接码订单';
+  if (typeof phoneVerificationHelpers?.cancelSignupPhoneActivation !== 'function') {
+    await addLog(`节点 ${nodeId || 'unknown'}：未找到接码订单释放接口，${identifier} 仅清空本地状态。`, 'warn');
+    return;
+  }
+  try {
+    await addLog(`节点 ${nodeId || 'unknown'}：正在释放异常注册手机号的接码订单 ${identifier}。`, 'warn');
+    await phoneVerificationHelpers.cancelSignupPhoneActivation(state, activation);
+    await addLog(`节点 ${nodeId || 'unknown'}：已释放异常注册手机号的接码订单 ${identifier}。`, 'warn');
+  } catch (releaseError) {
+    await addLog(
+      `节点 ${nodeId || 'unknown'}：释放异常注册手机号的接码订单 ${identifier} 失败，继续清空本地状态并重开。${getErrorMessage(releaseError)}`,
+      'warn'
+    );
+  }
+}
+
 async function restartSignupPhonePasswordMismatchAttemptFromNode(nodeId, restartCount, error) {
   const preservedState = await getState();
   const {
@@ -10067,6 +10910,7 @@ async function restartSignupPhonePasswordMismatchAttemptFromNode(nodeId, restart
     `节点 ${normalizedNodeId}：检测到${reasonLabel}，准备丢弃当前注册手机号并回到节点 open-chatgpt 重新开始（第 ${restartCount} 次重开）。${phoneSuffix}${emailSuffix}原因：${errorMessage}`,
     'warn'
   );
+  await releaseSignupPhoneActivationBeforeRestart(preservedState, normalizedNodeId);
   if (typeof invalidateDownstreamAfterNodeRestart === 'function') {
     await invalidateDownstreamAfterNodeRestart('open-chatgpt', {
       logLabel: `节点 ${normalizedNodeId} 检测到${reasonLabel}后准备回到 open-chatgpt 重新获取手机号重试（第 ${restartCount} 次重开）`,
@@ -10082,6 +10926,140 @@ async function restartSignupPhonePasswordMismatchAttemptFromNode(nodeId, restart
   if (Object.keys(restorePayload).length) {
     await setState(restorePayload);
   }
+}
+
+function isStep9WhatsAppPageRestartError(error) {
+  return String(error?.message || error || '').startsWith(STEP9_WHATSAPP_PAGE_RESTART_ERROR_PREFIX);
+}
+
+function normalizeSignupExcludedNumbers(values = []) {
+  const input = Array.isArray(values) ? values : [values];
+  const unique = [];
+  input.forEach((entry) => {
+    const phoneNumber = String(entry || '').trim();
+    if (!phoneNumber) {
+      return;
+    }
+    if (unique.some((saved) => phoneNumbersMatch(saved, phoneNumber))) {
+      return;
+    }
+    unique.push(phoneNumber);
+  });
+  return unique;
+}
+
+function collectStep9WhatsAppRestartNumbers(state = {}, error = null) {
+  return normalizeSignupExcludedNumbers([
+    error?.whatsappPhoneNumber,
+    error?.authState?.displayedPhone,
+    state?.currentPhoneActivation?.phoneNumber,
+    state?.signupPhoneActivation?.phoneNumber,
+    state?.signupPhoneCompletedActivation?.phoneNumber,
+    state?.signupPhoneNumber,
+    state?.phoneNumber,
+  ]);
+}
+
+async function releaseCurrentPhoneActivationBeforeRestart(state = {}, nodeId = '') {
+  const activation = state?.currentPhoneActivation;
+  if (!activation || typeof activation !== 'object' || Array.isArray(activation)) {
+    return;
+  }
+  const phoneNumber = String(activation.phoneNumber || '').trim();
+  const activationId = String(activation.activationId || activation.id || activation.activation || '').trim();
+  const identifier = phoneNumber || activationId || '当前接码订单';
+  if (typeof phoneVerificationHelpers?.cancelCurrentPhoneActivation !== 'function') {
+    await addLog(`节点 ${nodeId || 'unknown'}：未找到当前手机号订单释放接口，${identifier} 仅清空本地状态。`, 'warn');
+    return;
+  }
+  try {
+    await addLog(`节点 ${nodeId || 'unknown'}：正在释放当前手机号接码订单 ${identifier}。`, 'warn');
+    await phoneVerificationHelpers.cancelCurrentPhoneActivation(state, activation);
+    await addLog(`节点 ${nodeId || 'unknown'}：已释放当前手机号接码订单 ${identifier}。`, 'warn');
+  } catch (releaseError) {
+    await addLog(
+      `节点 ${nodeId || 'unknown'}：释放当前手机号接码订单 ${identifier} 失败，继续清空本地状态并重开。${getErrorMessage(releaseError)}`,
+      'warn'
+    );
+  }
+}
+
+async function restartStep9WhatsAppAttemptFromNode(nodeId, restartCount, error) {
+  const preservedState = await getState();
+  const maxAttempts = normalizeWhatsAppPhoneVerificationRestartMaxAttempts(
+    preservedState.whatsappPhoneVerificationRestartMaxAttempts,
+    DEFAULT_WHATSAPP_PHONE_VERIFICATION_RESTART_MAX_ATTEMPTS
+  );
+  if (restartCount > maxAttempts) {
+    await addLog(
+      `节点 ${String(nodeId || '').trim() || 'post-login-phone-verification'}：手机验证码页连续 ${maxAttempts} 次命中 WhatsApp，停止当前自动尝试。原因：${getErrorMessage(error)}`,
+      'error'
+    );
+    throw error;
+  }
+  const {
+    preservedEmail,
+    restorePayload,
+    shouldClearSignupPhoneRuntime,
+  } = getSignupPhonePasswordMismatchRestartPayload(preservedState);
+  const normalizedNodeId = String(nodeId || '').trim() || 'post-login-phone-verification';
+  const excludedNumbers = collectStep9WhatsAppRestartNumbers(preservedState, error);
+  const mergedExcludedNumbers = normalizeSignupExcludedNumbers([
+    ...(preservedState.signupPhoneExcludedNumbersThisAttempt || []),
+    ...excludedNumbers,
+  ]);
+  const emailSuffix = preservedEmail ? `当前邮箱：${preservedEmail}；` : '';
+  const phoneSuffix = excludedNumbers.length ? `本轮禁用号码：${excludedNumbers.join(' / ')}；` : '';
+  await addLog(
+    `节点 ${normalizedNodeId}：手机验证码页命中 WhatsApp，准备释放当前号码并回到节点 open-chatgpt 重开 OAuth（第 ${restartCount}/${maxAttempts} 次）。${phoneSuffix}${emailSuffix}原因：${getErrorMessage(error)}`,
+    'warn'
+  );
+  await releaseCurrentPhoneActivationBeforeRestart(preservedState, normalizedNodeId);
+  const currentActivationId = String(
+    preservedState?.currentPhoneActivation?.activationId
+    || preservedState?.currentPhoneActivation?.id
+    || preservedState?.currentPhoneActivation?.activation
+    || ''
+  ).trim();
+  const signupActivationId = String(
+    preservedState?.signupPhoneActivation?.activationId
+    || preservedState?.signupPhoneActivation?.id
+    || preservedState?.signupPhoneActivation?.activation
+    || ''
+  ).trim();
+  const sameActivation = Boolean(
+    (currentActivationId && signupActivationId && currentActivationId === signupActivationId)
+    || phoneNumbersMatch(
+      preservedState?.currentPhoneActivation?.phoneNumber,
+      preservedState?.signupPhoneActivation?.phoneNumber
+    )
+  );
+  if (!sameActivation) {
+    await releaseSignupPhoneActivationBeforeRestart(preservedState, normalizedNodeId);
+  }
+  if (typeof invalidateDownstreamAfterNodeRestart === 'function') {
+    await invalidateDownstreamAfterNodeRestart('open-chatgpt', {
+      logLabel: `节点 ${normalizedNodeId} 检测到 WhatsApp 手机验证码页后准备回到 open-chatgpt 重试（第 ${restartCount}/${maxAttempts} 次）`,
+    });
+  } else {
+    await invalidateDownstreamAfterStepRestart(1, {
+      logLabel: `节点 ${normalizedNodeId} 检测到 WhatsApp 手机验证码页后准备回到 open-chatgpt 重试（第 ${restartCount}/${maxAttempts} 次）`,
+    });
+  }
+  if (shouldClearSignupPhoneRuntime || preservedState?.currentPhoneActivation) {
+    await addLog(`节点 ${normalizedNodeId}：已清空本轮手机号运行态，下一次重开将重新获取号码。`, 'warn');
+  }
+  await setState({
+    ...restorePayload,
+    currentPhoneActivation: null,
+    phoneNumber: '',
+    currentPhoneVerificationCode: '',
+    currentPhoneVerificationCountdownEndsAt: 0,
+    currentPhoneVerificationCountdownWindowIndex: 0,
+    currentPhoneVerificationCountdownWindowTotal: 0,
+    signupPhoneExcludedNumbersThisAttempt: mergedExcludedNumbers,
+    whatsappPhoneVerificationRestartCount: restartCount,
+  });
 }
 
 function isSignupUserAlreadyExistsFailure(error) {
@@ -10170,6 +11148,37 @@ function isPlusCheckoutRestartRequiredFailure(error) {
     && !isHostedCheckoutGenericErrorFailure(error)
     && !isHostedCheckoutVerificationResendLimitFailure(error)
     && !isCloudCheckoutAlreadyPaidFailure(error);
+}
+
+function shouldSchedulePayPalCookieCleanupBeforeCheckoutCreate(nodeId, state = {}, error = null) {
+  if (normalizePlusPaymentMethodForRun(state?.plusPaymentMethod) !== PLUS_PAYMENT_METHOD_PAYPAL) {
+    return false;
+  }
+  const normalizedNodeId = String(nodeId || '').trim();
+  if (!normalizedNodeId) {
+    return false;
+  }
+  if (normalizedNodeId === 'paypal-approve') {
+    return true;
+  }
+  if (!['plus-checkout-create', 'plus-checkout-billing', 'plus-checkout-return'].includes(normalizedNodeId)) {
+    return false;
+  }
+  const message = getErrorMessage(error);
+  return isHostedCheckoutGenericErrorFailure(error)
+    || isHostedCheckoutCardFallbackFailure(error)
+    || isHostedCheckoutVerificationResendLimitFailure(error)
+    || /paypal/i.test(message);
+}
+
+async function schedulePayPalCookieCleanupBeforeCheckoutCreateIfNeeded(nodeId, state = {}, error = null) {
+  if (!shouldSchedulePayPalCookieCleanupBeforeCheckoutCreate(nodeId, state, error)) {
+    return false;
+  }
+  const updates = { pendingPayPalCookieCleanupBeforeCheckoutCreate: true };
+  await setState(updates);
+  broadcastDataUpdate(updates);
+  return true;
 }
 
 function shouldRetrySmsOauthNonFreeTrialFromStep7(state = {}, error = null) {
@@ -10265,6 +11274,8 @@ function getDownstreamStateResets(step, state = {}) {
     plusCheckoutCountry: 'DE',
     plusCheckoutCurrency: 'EUR',
     plusCheckoutSource: '',
+    paypalApprovalBranchRecoveryCount: 0,
+    pendingPayPalCookieCleanupBeforeCheckoutCreate: false,
     plusBillingCountryText: '',
     plusBillingAddress: null,
     plusPaypalApprovedAt: null,
@@ -10308,6 +11319,8 @@ function getDownstreamStateResets(step, state = {}) {
   if (step <= 1) {
     return {
       ...plusRuntimeResets,
+      paypalGenericErrorRecoveryCount: 0,
+      paypalApprovalBranchRecoveryCount: 0,
       oauthUrl: null,
       localCpaJsonOAuthState: null,
       localCpaJsonPkceCodes: null,
@@ -10341,6 +11354,8 @@ function getDownstreamStateResets(step, state = {}) {
   if (step === 2) {
     return {
       ...plusRuntimeResets,
+      paypalGenericErrorRecoveryCount: 0,
+      paypalApprovalBranchRecoveryCount: 0,
       password: null,
       lastEmailTimestamp: null,
       signupVerificationRequestedAt: null,
@@ -10360,6 +11375,8 @@ function getDownstreamStateResets(step, state = {}) {
   if (step === 3 || step === 4) {
     return {
       ...plusRuntimeResets,
+      paypalGenericErrorRecoveryCount: 0,
+      paypalApprovalBranchRecoveryCount: 0,
       lastEmailTimestamp: null,
       signupVerificationRequestedAt: null,
       loginVerificationRequestedAt: null,
@@ -10378,6 +11395,8 @@ function getDownstreamStateResets(step, state = {}) {
   if (step === 5 || step === 6 || step === 7 || step === 8) {
     return {
       ...(step <= 6 ? plusRuntimeResets : {}),
+      ...(step === 5 ? { paypalGenericErrorRecoveryCount: 0 } : {}),
+      ...(step === 5 ? { paypalApprovalBranchRecoveryCount: 0 } : {}),
       ...(step === 7 ? {
         plusBillingCountryText: '',
         plusBillingAddress: null,
@@ -11745,19 +12764,45 @@ async function failNodeFromBackground(nodeId, errorLike = '未知错误') {
     throw new Error('failNodeFromBackground 缺少 nodeId。');
   }
   const message = getErrorMessage(errorLike) || '未知错误';
+  const runBestEffort = async (label, operation) => {
+    try {
+      await operation();
+      return true;
+    } catch (error) {
+      console.warn(
+        LOG_PREFIX,
+        `[failNodeFromBackground] node ${normalizedNodeId} ${label} failed: ${getErrorMessage(error)}`,
+        error
+      );
+      return false;
+    }
+  };
   if (stopRequested || isStopError(errorLike)) {
-    await setNodeStatus(normalizedNodeId, 'stopped');
-    await addLog('已被用户停止', 'warn', { nodeId: normalizedNodeId });
-    await appendManualAccountRunRecordIfNeeded(`node:${normalizedNodeId}:stopped`, null, message);
-    notifyNodeError(normalizedNodeId, STOP_ERROR_MESSAGE);
+    try {
+      await runBestEffort('set stopped status', () => setNodeStatus(normalizedNodeId, 'stopped'));
+      await runBestEffort('write stop log', () => addLog('已被用户停止', 'warn', { nodeId: normalizedNodeId }));
+      await runBestEffort('append stop record', () => appendManualAccountRunRecordIfNeeded(`node:${normalizedNodeId}:stopped`, null, message));
+    } finally {
+      notifyNodeError(normalizedNodeId, STOP_ERROR_MESSAGE);
+    }
     return;
   }
 
   const latestState = await getState();
-  await setNodeStatus(normalizedNodeId, 'failed');
-  await addLog(`失败：${message}`, 'error', { nodeId: normalizedNodeId });
-  await appendManualAccountRunRecordIfNeeded(`node:${normalizedNodeId}:failed`, latestState, message);
-  notifyNodeError(normalizedNodeId, message);
+  try {
+    await runBestEffort('set failed status', () => setNodeStatus(normalizedNodeId, 'failed'));
+    await runBestEffort(
+      'schedule PayPal cookie cleanup',
+      () => schedulePayPalCookieCleanupBeforeCheckoutCreateIfNeeded(normalizedNodeId, latestState, errorLike)
+    );
+    await runBestEffort('write failure log', () => addLog(`失败：${message}`, 'error', { nodeId: normalizedNodeId }));
+    await runBestEffort(
+      'append failure record',
+      () => appendManualAccountRunRecordIfNeeded(`node:${normalizedNodeId}:failed`, latestState, message)
+    );
+  } finally {
+    notifyNodeError(normalizedNodeId, message);
+  }
 }
 
 async function appendManualAccountRunRecordIfNeeded(status, stateOverride = null, reason = '') {
@@ -11785,6 +12830,7 @@ async function finalizeDeferredNodeExecutionError(nodeId, error) {
   }
 
   await setNodeStatus(normalizedNodeId, 'failed');
+  await schedulePayPalCookieCleanupBeforeCheckoutCreateIfNeeded(normalizedNodeId, latestState, error);
   await addLog(`失败：${getErrorMessage(error)}`, 'error', { nodeId: normalizedNodeId });
   await appendManualAccountRunRecordIfNeeded(`node:${normalizedNodeId}:failed`, latestState, getErrorMessage(error));
 }
@@ -12089,6 +13135,13 @@ async function requestStop(options = {}) {
   const runningNodes = getRunningNodeIds(state.nodeStatuses, state);
   const inferredStopNode = inferStoppedRecordNode(state);
   const timerPlan = getPendingAutoRunTimerPlan(state);
+  const shouldClearCurrentPhoneAssignmentOnStop = (
+    Boolean(state?.currentPhoneActivation)
+    || Boolean(String(state?.currentPhoneVerificationCode || '').trim())
+    || Number(state?.currentPhoneVerificationCountdownEndsAt) > 0
+    || Number(state?.currentPhoneVerificationCountdownWindowIndex) > 0
+    || Number(state?.currentPhoneVerificationCountdownWindowTotal) > 0
+  );
 
   if (timerPlan?.kind === AUTO_RUN_TIMER_KIND_SCHEDULED_START && !autoRunActive) {
     await cancelScheduledAutoRun({
@@ -12137,6 +13190,59 @@ async function requestStop(options = {}) {
 
   await addLog(logMessage, 'warn');
   await broadcastStopToContentScripts();
+  if (state?.phoneAutoReleaseOnStopEnabled !== false) {
+    const normalizeStopPhone = (value) => String(value || '').replace(/\D+/g, '');
+    const currentActivationId = String(
+      state?.currentPhoneActivation?.activationId
+      || state?.currentPhoneActivation?.id
+      || state?.currentPhoneActivation?.activation
+      || ''
+    ).trim();
+    const signupActivationId = String(
+      state?.signupPhoneActivation?.activationId
+      || state?.signupPhoneActivation?.id
+      || state?.signupPhoneActivation?.activation
+      || ''
+    ).trim();
+    const samePhoneActivation = Boolean(
+      (currentActivationId && signupActivationId && currentActivationId === signupActivationId)
+      || (
+        normalizeStopPhone(state?.currentPhoneActivation?.phoneNumber)
+        && normalizeStopPhone(state?.currentPhoneActivation?.phoneNumber) === normalizeStopPhone(state?.signupPhoneActivation?.phoneNumber)
+      )
+    );
+    if (state?.currentPhoneActivation && typeof phoneVerificationHelpers?.cancelCurrentPhoneActivation === 'function') {
+      try {
+        await addLog('停止流程：正在自动释放当前接码手机号订单。', 'warn');
+        await phoneVerificationHelpers.cancelCurrentPhoneActivation(state, state.currentPhoneActivation);
+      } catch (releaseError) {
+        await addLog(`停止流程：自动释放当前接码手机号订单失败。${releaseError?.message || releaseError || '未知错误'}`, 'warn');
+      }
+    }
+    if (
+      state?.signupPhoneActivation
+      && !samePhoneActivation
+      && typeof phoneVerificationHelpers?.cancelSignupPhoneActivation === 'function'
+    ) {
+      try {
+        await addLog('停止流程：正在自动释放注册手机号接码订单。', 'warn');
+        await phoneVerificationHelpers.cancelSignupPhoneActivation(state, state.signupPhoneActivation);
+      } catch (releaseError) {
+        await addLog(`停止流程：自动释放注册手机号接码订单失败。${releaseError?.message || releaseError || '未知错误'}`, 'warn');
+      }
+    }
+  }
+  if (shouldClearCurrentPhoneAssignmentOnStop) {
+    const phoneStopStateUpdates = {
+      currentPhoneActivation: null,
+      currentPhoneVerificationCode: '',
+      currentPhoneVerificationCountdownEndsAt: 0,
+      currentPhoneVerificationCountdownWindowIndex: 0,
+      currentPhoneVerificationCountdownWindowTotal: 0,
+    };
+    await setState(phoneStopStateUpdates);
+    broadcastDataUpdate(phoneStopStateUpdates);
+  }
 
   if (!runningNodes.length && inferredStopNode) {
     await appendAndBroadcastAccountRunRecord('stopped', state, STOP_ERROR_MESSAGE);
@@ -12419,6 +13525,8 @@ function getEmailGeneratorLabel(generator) {
   if (generator === 'cloudflare') return 'Cloudflare 邮箱';
   if (generator === CLOUDFLARE_TEMP_EMAIL_GENERATOR) return 'Cloudflare Temp Email';
   if (generator === CLOUD_MAIL_GENERATOR) return 'Cloud Mail';
+  if (generator === FREEMAIL_GENERATOR) return 'freemail';
+  if (generator === OUTLOOK_EMAIL_PLUS_GENERATOR) return 'Outlook Email Plus';
   return 'Duck 邮箱';
 }
 const mail2925SessionManager = self.MultiPageBackgroundMail2925Session?.createMail2925SessionManager({
@@ -12595,9 +13703,22 @@ async function fetchDuckEmail(options = {}) {
 
 async function fetchGeneratedEmail(state, options = {}) {
   const currentState = state || await getState();
+  const mergedState = {
+    ...currentState,
+    freemailBaseUrl: options.freemailBaseUrl ?? currentState.freemailBaseUrl,
+    freemailAdminUsername: options.freemailAdminUsername ?? currentState.freemailAdminUsername,
+    freemailAdminPassword: options.freemailAdminPassword ?? currentState.freemailAdminPassword,
+    freemailDomain: options.freemailDomain ?? currentState.freemailDomain,
+  };
   const generator = normalizeEmailGenerator(options.generator ?? currentState.emailGenerator);
+  if (generator === OUTLOOK_EMAIL_PLUS_GENERATOR) {
+    return claimOutlookEmailPlusAddress(currentState, options);
+  }
   if (generator === CLOUD_MAIL_GENERATOR) {
     return fetchCloudMailAddress(currentState, options);
+  }
+  if (generator === FREEMAIL_GENERATOR) {
+    return fetchFreemailAddress(mergedState, options);
   }
   return generatedEmailHelpers.fetchGeneratedEmail(state, options);
 }
@@ -12675,13 +13796,13 @@ async function broadcastAccountRunHistoryUpdate() {
 }
 
 async function appendAndBroadcastAccountRunRecord(status, stateOverride = null, reason = '') {
-  if (!accountRunHistoryHelpers?.appendAccountRunRecord) {
-    return null;
-  }
-
   const state = stateOverride || await getState();
   const resolvedStatus = resolveAccountRunRecordStatusForStop(status, state);
   const resolvedReason = resolveAccountRunRecordReasonForStop(resolvedStatus, reason);
+  await finalizeOutlookEmailPlusClaimForAccountRunRecord(resolvedStatus, state, resolvedReason);
+  if (!accountRunHistoryHelpers?.appendAccountRunRecord) {
+    return null;
+  }
   const record = await accountRunHistoryHelpers.appendAccountRunRecord(resolvedStatus, state, resolvedReason);
   if (!record) {
     return null;
@@ -13526,11 +14647,16 @@ async function runAutoSequenceFromNodeGraph(startNodeId, context = {}) {
   let goPayCheckoutRestartCount = 0;
   let gpcCheckoutRestartCount = 0;
   let plusCheckoutRestartCount = 0;
+  let smsOauthNonFreeTrialCheckoutRestartCount = 0;
   let step4RestartCount = 0;
   const nodeIdleRestartCounts = new Map();
   let currentStartNodeId = String(startNodeId || '').trim();
   let continueCurrentAttempt = continued;
   const resolvedSignupMethod = await ensureResolvedSignupMethodForRun();
+  await setState({
+    signupPhoneExcludedNumbersThisAttempt: [],
+    whatsappPhoneVerificationRestartCount: 0,
+  });
   const normalizePlusPaymentMethodForRun = typeof normalizePlusPaymentMethod === 'function'
     ? normalizePlusPaymentMethod
     : (value) => (String(value || '').trim().toLowerCase() === 'gpc-helper' ? 'gpc-helper' : String(value || '').trim().toLowerCase());
@@ -13648,6 +14774,16 @@ async function runAutoSequenceFromNodeGraph(startNodeId, context = {}) {
     setRestartNode(nodeId);
     return true;
   };
+  const stopIfStep4RestartLimitExceeded = async (nodeId, restartCount, error, state = {}) => {
+    if (restartCount <= AUTO_RUN_MAX_RETRIES_PER_ROUND) {
+      return;
+    }
+    await addLog(
+      `节点 ${getNodeLabel(nodeId, state)}：步骤 4 已连续重开 ${AUTO_RUN_MAX_RETRIES_PER_ROUND} 次仍失败，停止当前自动尝试，避免在短信等待或 contact-verification 异常中循环。原因：${getErrorMessage(error)}`,
+      'error'
+    );
+    throw error;
+  };
 
   while (true) {
 
@@ -13720,6 +14856,7 @@ async function runAutoSequenceFromNodeGraph(startNodeId, context = {}) {
         }
         if (isSignupPhonePasswordMismatchFailure(err)) {
           step4RestartCount += 1;
+          await stopIfStep4RestartLimitExceeded('fill-password', step4RestartCount, err, latestState);
           await restartSignupPhonePasswordMismatchAttemptFromNode('fill-password', step4RestartCount, err);
           setRestartNode('open-chatgpt');
           restartFromStep1WithCurrentEmail = true;
@@ -13778,16 +14915,31 @@ async function runAutoSequenceFromNodeGraph(startNodeId, context = {}) {
 
       const step = getDisplayStepForNode(nodeId, latestState);
       const nodeExecutionKey = getNodeExecutionKey(nodeId, latestState);
+      if (isStep9WhatsAppPageRestartError(err)) {
+        const nextRestartCount = Math.max(0, Number(latestState?.whatsappPhoneVerificationRestartCount) || 0) + 1;
+        await restartStep9WhatsAppAttemptFromNode(nodeId, nextRestartCount, err);
+        setRestartNode('open-chatgpt');
+        restartFromStep1WithCurrentEmail = true;
+        break;
+      }
       if (shouldRetrySmsOauthNonFreeTrialFromStep7(latestState, err)) {
+        smsOauthNonFreeTrialCheckoutRestartCount += 1;
+        if (smsOauthNonFreeTrialCheckoutRestartCount > AUTO_RUN_MAX_RETRIES_PER_ROUND) {
+          await addLog(
+            `节点 ${getNodeLabel(nodeId, latestState)}：先手机号注册 OAuth 检测到 Plus 今日应付金额非 0，已连续重建 Checkout ${AUTO_RUN_MAX_RETRIES_PER_ROUND} 次仍无免费试用资格，停止当前注册流程的 Checkout 内部重试。原因：${getErrorMessage(err)}`,
+            'error'
+          );
+          throw err;
+        }
         plusCheckoutRestartCount += 1;
         const checkoutCreateStep = getDisplayStepForNode('plus-checkout-create', latestState) || 7;
         await addLog(
-          `节点 ${getNodeLabel(nodeId, latestState)}：先手机号注册 OAuth 检测到 Plus 今日应付金额非 0，将保留当前注册流程并直接回到第 ${checkoutCreateStep} 步 plus-checkout-create 重试（第 ${plusCheckoutRestartCount} 次）。原因：${getErrorMessage(err)}`,
+          `节点 ${getNodeLabel(nodeId, latestState)}：先手机号注册 OAuth 检测到 Plus 今日应付金额非 0，将保留当前注册流程并直接回到第 ${checkoutCreateStep} 步 plus-checkout-create 重试（第 ${smsOauthNonFreeTrialCheckoutRestartCount}/${AUTO_RUN_MAX_RETRIES_PER_ROUND} 次）。原因：${getErrorMessage(err)}`,
           'warn'
         );
         const checkoutResetAnchorNodeId = getPreviousNodeId('plus-checkout-create', latestState) || 'fill-profile';
         await invalidateDownstreamAfterAutoRunNodeRestart(checkoutResetAnchorNodeId, {
-          logLabel: `先手机号注册 OAuth 非 0 金额后回到第 ${checkoutCreateStep} 步 plus-checkout-create 重试（第 ${plusCheckoutRestartCount} 次）`,
+          logLabel: `先手机号注册 OAuth 非 0 金额后回到第 ${checkoutCreateStep} 步 plus-checkout-create 重试（第 ${smsOauthNonFreeTrialCheckoutRestartCount}/${AUTO_RUN_MAX_RETRIES_PER_ROUND} 次）`,
         });
         nodeIndex = Math.max(0, getNodeIndex(await getState(), 'plus-checkout-create'));
         continue;
@@ -13822,6 +14974,7 @@ async function runAutoSequenceFromNodeGraph(startNodeId, context = {}) {
         await invalidateDownstreamAfterAutoRunNodeRestart(checkoutResetAnchorNodeId, {
           logLabel: `节点 ${nodeId} ${checkoutLabel}失败后准备回到 plus-checkout-create 重试（第 ${checkoutRestartCount} 次）`,
         });
+        await schedulePayPalCookieCleanupBeforeCheckoutCreateIfNeeded(nodeId, latestState, err);
         nodeIndex = Math.max(0, getNodeIndex(await getState(), 'plus-checkout-create'));
         continue;
       }
@@ -13852,6 +15005,7 @@ async function runAutoSequenceFromNodeGraph(startNodeId, context = {}) {
           throw err;
         }
         step4RestartCount += 1;
+        await stopIfStep4RestartLimitExceeded('fetch-signup-code', step4RestartCount, err, latestState);
         const isPhoneResendBanned = typeof phoneVerificationHelpers !== 'undefined'
           && typeof phoneVerificationHelpers?.isPhoneResendBannedNumberError === 'function'
           && phoneVerificationHelpers.isPhoneResendBannedNumberError(err);
@@ -14103,6 +15257,9 @@ const verificationFlowHelpers = self.MultiPageBackgroundVerificationFlow?.create
   closeConflictingTabsForSource,
   CLOUDFLARE_TEMP_EMAIL_PROVIDER,
   CLOUD_MAIL_PROVIDER,
+  FREEMAIL_PROVIDER,
+  ICLOUD_API_PROVIDER,
+  OUTLOOK_EMAIL_PLUS_PROVIDER,
   completeNodeFromBackground,
   confirmCustomVerificationStepBypassRequest: (step) => chrome.runtime.sendMessage({
     type: 'REQUEST_CUSTOM_VERIFICATION_BYPASS_CONFIRMATION',
@@ -14123,6 +15280,9 @@ const verificationFlowHelpers = self.MultiPageBackgroundVerificationFlow?.create
   MAIL_2925_VERIFICATION_MAX_ATTEMPTS,
   pollCloudflareTempEmailVerificationCode,
   pollCloudMailVerificationCode,
+  pollFreemailVerificationCode,
+  pollIcloudApiVerificationCode,
+  pollOutlookEmailPlusVerificationCode,
   pollHotmailVerificationCode,
   pollLuckmailVerificationCode,
   sendToContentScript,
@@ -14261,10 +15421,12 @@ const step4Executor = self.MultiPageBackgroundStep4?.createStep4Executor({
   getMailConfig,
   getTabId,
   HOTMAIL_PROVIDER,
+  ICLOUD_API_PROVIDER,
   isTabAlive,
   LUCKMAIL_PROVIDER,
   CLOUDFLARE_TEMP_EMAIL_PROVIDER,
   CLOUD_MAIL_PROVIDER,
+  FREEMAIL_PROVIDER,
   resolveVerificationStep: verificationFlowHelpers.resolveVerificationStep,
   reuseOrCreateTab,
   sendToContentScript,
@@ -14323,6 +15485,7 @@ const step8Executor = self.MultiPageBackgroundStep8?.createStep8Executor({
   chrome,
   CLOUDFLARE_TEMP_EMAIL_PROVIDER,
   CLOUD_MAIL_PROVIDER,
+  FREEMAIL_PROVIDER,
   completeNodeFromBackground,
   confirmCustomVerificationStepBypass: verificationFlowHelpers.confirmCustomVerificationStepBypass,
   ensureMail2925MailboxSession,
@@ -14335,6 +15498,7 @@ const step8Executor = self.MultiPageBackgroundStep8?.createStep8Executor({
   getState,
   getTabId,
   HOTMAIL_PROVIDER,
+  ICLOUD_API_PROVIDER,
   isTabAlive,
   isVerificationMailPollingError,
   LUCKMAIL_PROVIDER,
@@ -14363,6 +15527,7 @@ const plusCheckoutCreateExecutor = self.MultiPageBackgroundPlusCheckoutCreate?.c
   ensureContentScriptReadyOnTabUntilStopped,
   failNodeFromBackground,
   fetch: typeof fetch === 'function' ? fetch.bind(globalThis) : null,
+  getStepIdByKeyForState,
   getState,
   requestStop,
   getLastNodeIdForState,
@@ -14372,6 +15537,7 @@ const plusCheckoutCreateExecutor = self.MultiPageBackgroundPlusCheckoutCreate?.c
   setNodeStatus,
   setState,
   sleepWithStop,
+  startOAuthFlowTimeoutWindow,
   throwIfStopped,
   waitForTabCompleteUntilStopped,
   waitForTabUrlMatchUntilStopped,
@@ -14513,7 +15679,8 @@ const step10Executor = self.MultiPageBackgroundStep10?.createStep10Executor({
 
 function resolveBoundEmailForReloginState(state = {}) {
   return String(
-    state?.step8VerificationTargetEmail
+    state?.boundEmail
+    || state?.step8VerificationTargetEmail
     || state?.email
     || state?.registrationEmailState?.current
     || ''
@@ -14539,6 +15706,7 @@ async function executeReloginBoundEmail(state = {}) {
     accountIdentifierType: 'email',
     accountIdentifier: boundEmail,
     email: boundEmail,
+    boundEmail,
     step8VerificationTargetEmail: boundEmail,
   });
 }
@@ -14613,6 +15781,7 @@ const messageRouter = self.MultiPageBackgroundMessageRouter?.createMessageRouter
   testCheckoutConversionProxy: (...args) => plusCheckoutCreateExecutor.testCheckoutConversionProxy(...args),
   fetchGeneratedEmail,
   refreshGpcCardBalance,
+  refreshOAuthTimeoutWindowAfterCheckoutSuccess,
   finalizePhoneActivationAfterSuccessfulFlow,
   finalizeStep3Completion: async () => {
     const currentState = await getState();
@@ -14931,6 +16100,9 @@ function getMailConfig(state) {
       navigateOnReuse: true,
     };
   }
+  if (provider === ICLOUD_API_PROVIDER) {
+    return { provider: ICLOUD_API_PROVIDER, label: 'iCloud API（QQ 转发）' };
+  }
   if (provider === GMAIL_PROVIDER) {
     return {
       source: 'gmail-mail',
@@ -14948,6 +16120,12 @@ function getMailConfig(state) {
   }
   if (provider === 'cloudmail') {
     return { provider: 'cloudmail', label: 'Cloud Mail' };
+  }
+  if (provider === FREEMAIL_PROVIDER) {
+    return { provider: FREEMAIL_PROVIDER, label: 'freemail' };
+  }
+  if (provider === OUTLOOK_EMAIL_PLUS_PROVIDER) {
+    return { provider: OUTLOOK_EMAIL_PLUS_PROVIDER, label: 'Outlook Email Plus' };
   }
   if (provider === '163') {
     return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 邮箱' };
@@ -15122,7 +16300,11 @@ async function startOAuthFlowTimeoutWindow(options = {}) {
       oauthFlowDeadlineAt: null,
       oauthFlowDeadlineSourceUrl: null,
     });
-    await addLog(`步骤 ${step}：已拿到新的 OAuth 登录地址，授权后链总超时已关闭，仅保留各步骤本地等待超时。`, 'info');
+    await addLog(
+      String(options.disabledLogMessage || '').trim()
+        || `步骤 ${step}：已拿到新的 OAuth 登录地址，授权后链总超时已关闭，仅保留各步骤本地等待超时。`,
+      'info'
+    );
     return null;
   }
 
@@ -15131,7 +16313,11 @@ async function startOAuthFlowTimeoutWindow(options = {}) {
     oauthFlowDeadlineAt: deadlineAt,
     oauthFlowDeadlineSourceUrl: normalizeOAuthFlowSourceUrl(options.oauthUrl),
   });
-  await addLog(`步骤 ${step}：已拿到新的 OAuth 登录地址，开始 ${Math.round(OAUTH_FLOW_TIMEOUT_MS / 60000)} 分钟倒计时。`, 'info');
+  await addLog(
+    String(options.logMessage || '').trim()
+      || `步骤 ${step}：已拿到新的 OAuth 登录地址，开始 ${Math.round(OAUTH_FLOW_TIMEOUT_MS / 60000)} 分钟倒计时。`,
+    'info'
+  );
   return deadlineAt;
 }
 
@@ -15187,6 +16373,28 @@ async function getOAuthFlowStepTimeoutMs(defaultTimeoutMs, options = {}) {
   }
 
   return Math.max(1000, Math.min(normalizedDefault, budgetMs));
+}
+
+async function refreshOAuthTimeoutWindowAfterCheckoutSuccess(options = {}) {
+  const latestState = await getState();
+  const oauthUrl = normalizeOAuthFlowSourceUrl(latestState?.oauthUrl);
+  if (!oauthUrl) {
+    await addLog('hosted checkout 已确认完成，但当前缺少 OAuth 链接，无法刷新 localhost 回调等待窗口。', 'warn');
+    return null;
+  }
+  const confirmOauthStep = typeof getStepIdByKeyForState === 'function'
+    ? Number(getStepIdByKeyForState('confirm-oauth', latestState))
+    : 0;
+  const step = Number.isInteger(confirmOauthStep) && confirmOauthStep > 0 ? confirmOauthStep : 9;
+  const sourceLabel = String(options.source || '').trim();
+  const prefix = sourceLabel ? `hosted checkout 已确认完成（${sourceLabel}）` : 'hosted checkout 已确认完成';
+  return startOAuthFlowTimeoutWindow({
+    step,
+    oauthUrl,
+    state: latestState,
+    logMessage: `步骤 ${step}：${prefix}，刷新 OAuth localhost 回调等待窗口。`,
+    disabledLogMessage: `步骤 ${step}：${prefix}；授权后链总超时已关闭，仅保留各步骤本地等待超时。`,
+  });
 }
 
 function isStep6SuccessResult(result) {
@@ -15953,8 +17161,11 @@ async function waitForStep8Ready(tabId, timeoutMs = STEP8_READY_WAIT_TIMEOUT_MS,
         || /\/sign-in-with-chatgpt\/[^/?#]+\/consent(?:[/?#]|$)/i.test(retryUrl)
       );
       if (!consentLikeRetry) {
-        throw new Error(`步骤 ${visibleStep}：当前认证页已进入重试页，当前流程将直接报错。URL: ${pageState.url || 'unknown'}`);
+        return pageState;
       }
+    }
+    if (pageState?.verificationPage || pageState?.addEmailPage) {
+      return pageState;
     }
     if (pageState?.consentReady) {
       return pageState;
@@ -16000,6 +17211,9 @@ async function prepareStep8DebuggerClick(tabId, options = {}) {
   });
 
   if (result?.error) {
+    if (result?.recoverableAuthFallback && result?.pageState) {
+      return result;
+    }
     throw new Error(result.error);
   }
 
@@ -16035,6 +17249,9 @@ async function triggerStep8ContentStrategy(tabId, strategy, options = {}) {
   });
 
   if (result?.error) {
+    if (result?.recoverableAuthFallback && result?.pageState) {
+      return result;
+    }
     throw new Error(result.error);
   }
 
@@ -16131,16 +17348,23 @@ async function waitForStep8ClickEffect(tabId, baselineUrl, timeoutMs = STEP8_CLI
       throw new Error(`步骤 ${visibleStep}：认证页面标签页已关闭，无法继续自动授权。`);
     }
 
-    if (baselineUrl && typeof tab.url === 'string' && tab.url !== baselineUrl) {
-      return { progressed: true, reason: 'url_changed', url: tab.url };
-    }
-
     const pageState = await getStep8PageState(tabId, 1500, visibleStep);
     if (pageState?.maxCheckAttemptsBlocked) {
       throw new Error(`${CLOUDFLARE_SECURITY_BLOCK_ERROR_PREFIX}${CLOUDFLARE_SECURITY_BLOCK_USER_MESSAGE}`);
     }
     if (pageState?.addPhonePage) {
       throw new Error(`步骤 ${visibleStep}：点击“继续”后页面跳到了手机号页面，当前流程无法继续自动授权。`);
+    }
+    if (pageState?.phoneVerificationPage) {
+      throw new Error(`步骤 ${visibleStep}：点击“继续”后页面跳到了手机验证码页，当前流程无法继续自动授权。`);
+    }
+    if (pageState?.verificationPage || pageState?.addEmailPage) {
+      return {
+        progressed: false,
+        reason: 'auth_fallback',
+        pageState,
+        url: pageState.url || baselineUrl || '',
+      };
     }
     if (pageState?.retryPage) {
       const retryUrl = String(pageState?.url || baselineUrl || '').trim();
@@ -16150,8 +17374,16 @@ async function waitForStep8ClickEffect(tabId, baselineUrl, timeoutMs = STEP8_CLI
         || /\/sign-in-with-chatgpt\/[^/?#]+\/consent(?:[/?#]|$)/i.test(retryUrl)
       );
       if (!consentLikeRetry) {
-        throw new Error(`步骤 ${visibleStep}：点击“继续”后页面进入认证页重试页，当前流程将直接报错。URL: ${pageState.url || baselineUrl || 'unknown'}`);
+        return {
+          progressed: false,
+          reason: 'auth_fallback',
+          pageState,
+          url: pageState.url || baselineUrl || 'unknown',
+        };
       }
+    }
+    if (baselineUrl && typeof tab.url === 'string' && tab.url !== baselineUrl) {
+      return { progressed: true, reason: 'url_changed', url: tab.url };
     }
     if (pageState === null) {
       if (!recovered) {
@@ -16283,7 +17515,16 @@ async function recoverOAuthLocalhostTimeout(details = {}) {
   if (authStartIndex < 0 || confirmIndex < 0 || authStartIndex >= confirmIndex) {
     return null;
   }
-  const recoveryNodeIds = workflowNodeIds.slice(authStartIndex, confirmIndex);
+  const supportedRecoveryNodeIds = new Set([
+    'oauth-login',
+    'fetch-login-code',
+    'post-login-phone-verification',
+    'bind-email',
+    'fetch-bind-email-code',
+  ]);
+  const rawRecoveryNodeIds = workflowNodeIds.slice(authStartIndex, confirmIndex);
+  const skippedRecoveryNodeIds = rawRecoveryNodeIds.filter((nodeId) => !supportedRecoveryNodeIds.has(nodeId));
+  const recoveryNodeIds = rawRecoveryNodeIds.filter((nodeId) => supportedRecoveryNodeIds.has(nodeId));
   const runRecoveryNode = async (nodeId) => {
     const recoveryState = await getState();
     const recoveryStep = getStepIdByNodeIdForState(nodeId, recoveryState);
@@ -16307,6 +17548,18 @@ async function recoverOAuthLocalhostTimeout(details = {}) {
         throw new Error(`OAuth localhost 恢复不支持节点 ${nodeId}。`);
     }
   };
+
+  if (skippedRecoveryNodeIds.length) {
+    await addLog(
+      `OAuth localhost 恢复将跳过非认证前置节点：${skippedRecoveryNodeIds.join(' -> ')}。`,
+      'warn',
+      { step: visibleStep, stepKey: 'confirm-oauth' }
+    );
+  }
+
+  if (!recoveryNodeIds.length) {
+    return null;
+  }
 
   await addLog(
     `正在自动重开 OAuth 前置节点：${recoveryNodeIds.join(' -> ')}。`,
@@ -16338,6 +17591,113 @@ async function recoverOAuthLocalhostTimeout(details = {}) {
   return await getState();
 }
 
+function getStep9AuthFallbackRecoveryNodeIds(latestState = {}, visibleStep = 9) {
+  const authLoginStep = typeof getAuthChainStartStepId === 'function'
+    ? getAuthChainStartStepId(latestState)
+    : FINAL_OAUTH_CHAIN_START_STEP;
+  const authLoginNodeId = String(getNodeIdByStepForState(authLoginStep, latestState) || 'oauth-login').trim();
+  const confirmNodeId = String(getNodeIdByStepForState(visibleStep, latestState) || 'confirm-oauth').trim();
+  const workflowNodeIds = getAutoRunWorkflowNodeIds(latestState);
+  const authStartIndex = workflowNodeIds.indexOf(authLoginNodeId);
+  const confirmIndex = workflowNodeIds.indexOf(confirmNodeId);
+  if (authStartIndex < 0 || confirmIndex < 0 || authStartIndex >= confirmIndex) {
+    return [];
+  }
+
+  const supportedRecoveryNodeIds = new Set([
+    'oauth-login',
+    'fetch-login-code',
+    'post-login-phone-verification',
+    'bind-email',
+    'fetch-bind-email-code',
+    'relogin-bound-email',
+    'fetch-bound-email-login-code',
+    'post-bound-email-phone-verification',
+  ]);
+  return workflowNodeIds
+    .slice(authStartIndex, confirmIndex)
+    .filter((nodeId) => supportedRecoveryNodeIds.has(nodeId));
+}
+
+async function runStep9AuthFallbackRecoveryNode(nodeId, latestState = {}) {
+  const recoveryStep = getStepIdByNodeIdForState(nodeId, latestState);
+  const payload = {
+    ...latestState,
+    visibleStep: recoveryStep,
+    nodeId,
+  };
+  switch (nodeId) {
+    case 'oauth-login':
+      return step7Executor.executeStep7(payload);
+    case 'fetch-login-code':
+      return step8Executor.executeStep8(payload);
+    case 'post-login-phone-verification':
+      return step8Executor.executePostLoginPhoneVerification(payload);
+    case 'bind-email':
+      return step8Executor.executeBindEmail(payload);
+    case 'fetch-bind-email-code':
+      return step8Executor.executeFetchBindEmailCode(payload);
+    case 'relogin-bound-email':
+      return executeReloginBoundEmail(payload);
+    case 'fetch-bound-email-login-code':
+      return step8Executor.executeBoundEmailLoginCode(payload);
+    case 'post-bound-email-phone-verification':
+      return step8Executor.executeBoundEmailPostLoginPhoneVerification(payload);
+    default:
+      throw new Error(`OAuth 回流恢复不支持节点 ${nodeId}。`);
+  }
+}
+
+async function recoverStep9AuthFallback(details = {}) {
+  const {
+    state = {},
+    pageState = {},
+    visibleStep = 9,
+    recoveryAttempt = 1,
+  } = details;
+
+  const latestState = await getState();
+  const recoveryNodeIds = getStep9AuthFallbackRecoveryNodeIds(latestState, visibleStep);
+  if (!recoveryNodeIds.length) {
+    return null;
+  }
+
+  const pageLabel = pageState?.displayedEmail
+    ? `${getLoginAuthStateLabel(pageState?.state || 'verification_page')}（${pageState.displayedEmail}）`
+    : getLoginAuthStateLabel(pageState?.state || 'verification_page');
+  await addLog(
+    `步骤 ${visibleStep}：第 ${recoveryAttempt} 次检测到认证页回流到 ${pageLabel}，正在复用现有登录验证码链路自动恢复：${recoveryNodeIds.join(' -> ')}。`,
+    'warn',
+    { step: visibleStep, stepKey: 'confirm-oauth' }
+  );
+
+  for (const nodeId of recoveryNodeIds) {
+    const currentState = await getState();
+    await runStep9AuthFallbackRecoveryNode(nodeId, currentState);
+  }
+
+  const recoveredState = await getState();
+  const nextOauthUrl = String(recoveredState?.oauthUrl || state?.oauthUrl || '').trim();
+  if (nextOauthUrl && typeof startOAuthFlowTimeoutWindow === 'function') {
+    await startOAuthFlowTimeoutWindow({
+      step: Number(visibleStep) || 9,
+      oauthUrl: nextOauthUrl,
+      state: recoveredState,
+      logMessage: `步骤 ${visibleStep}：认证页回流恢复完成，刷新 OAuth localhost 回调等待窗口。`,
+      disabledLogMessage: `步骤 ${visibleStep}：认证页回流恢复完成；授权后链总超时已关闭，仅保留各步骤本地等待超时。`,
+    });
+  }
+  await setState({
+    localhostUrl: null,
+  });
+  await addLog(
+    `步骤 ${visibleStep}：认证页回流恢复完成，准备重新执行当前 OAuth 确认。`,
+    'warn',
+    { step: visibleStep, stepKey: 'confirm-oauth' }
+  );
+  return recoveredState;
+}
+
 const step9Executor = self.MultiPageBackgroundStep9?.createStep9Executor({
   addLog,
   chrome,
@@ -16356,6 +17716,7 @@ const step9Executor = self.MultiPageBackgroundStep9?.createStep9Executor({
   isTabAlive,
   prepareStep8DebuggerClick,
   recoverOAuthLocalhostTimeout,
+  recoverStep9AuthFallback,
   reloadStep8ConsentPage,
   reuseOrCreateTab,
   setStep8PendingReject,

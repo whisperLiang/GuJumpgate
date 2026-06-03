@@ -16,6 +16,7 @@ __pycache__/
 *.pyc
 .worktrees/
 /release-artifacts/
+/tests/
 # Local exported runtime settings
 /config.json
 /multipage-settings-*.json

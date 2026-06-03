@@ -393,6 +393,15 @@
       countryLabel: normalizeSmsBowerCountryLabel(fallback.countryLabel || fallback.label, DEFAULT_COUNTRY_LABEL),
       successfulUses: Math.max(0, Math.floor(Number(record?.successfulUses) || 0)),
       maxUses,
+      ...(Array.isArray(record?.smsBowerIgnoredCodes) || Array.isArray(fallback?.smsBowerIgnoredCodes)
+        ? {
+          smsBowerIgnoredCodes: Array.from(new Set(
+            (Array.isArray(record?.smsBowerIgnoredCodes) ? record.smsBowerIgnoredCodes : fallback.smsBowerIgnoredCodes)
+              .map((entry) => extractVerificationCode(entry))
+              .filter(Boolean)
+            )),
+        }
+        : {}),
       ...(canGetAnotherSms !== null ? { canGetAnotherSms } : {}),
       ...(normalizedActivationCost !== null ? { price: normalizedActivationCost } : {}),
       ...(lastPhoneCode ? { lastPhoneCode } : {}),
@@ -633,6 +642,48 @@
     return describePayload(payload);
   }
 
+  function resolveIgnoredCodeSet(activation = null) {
+    const ignoredCodes = Array.isArray(activation?.smsBowerIgnoredCodes)
+      ? activation.smsBowerIgnoredCodes
+      : [];
+    return new Set(ignoredCodes.map((entry) => extractVerificationCode(entry)).filter(Boolean));
+  }
+
+  function extractCodeFromStatusText(statusText = '') {
+    const okMatch = String(statusText || '').match(/^STATUS_OK:(.+)$/i);
+    return okMatch ? extractVerificationCode(okMatch[1]) : '';
+  }
+
+  async function captureExistingCodesForActivation(state = {}, activation, deps = {}) {
+    const normalizedActivation = normalizeActivation(activation, activation);
+    if (!normalizedActivation) {
+      return [];
+    }
+    try {
+      const payload = await fetchPayload(resolveConfig(state, deps), {
+        action: 'getStatus',
+        id: normalizedActivation.activationId,
+      }, 'SMSBower capture existing sms');
+      const code = extractCodeFromStatusText(describePayload(payload));
+      return code ? [code] : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function reuseActivation(state = {}, activation, deps = {}) {
+    const normalizedActivation = normalizeActivation(activation, activation);
+    if (!normalizedActivation) {
+      throw new Error('缺少可复用的 SMSBower 手机号订单。');
+    }
+    const existingCodes = await captureExistingCodesForActivation(state, normalizedActivation, deps);
+    await setActivationStatus(state, normalizedActivation, 3, deps);
+    return {
+      ...normalizedActivation,
+      ...(existingCodes.length ? { smsBowerIgnoredCodes: existingCodes } : {}),
+    };
+  }
+
   async function finishActivation(state = {}, activation, deps = {}) {
     return setActivationStatus(state, activation, 6, deps);
   }
@@ -722,6 +773,8 @@
     const start = Date.now();
     let pollCount = 0;
     let lastResponse = '';
+    const ignoredCodes = resolveIgnoredCodeSet(normalizedActivation);
+    let ignoredHistoricalCodeLogged = false;
 
     while (Date.now() - start < timeoutMs) {
       if (maxRounds > 0 && pollCount >= maxRounds) break;
@@ -743,9 +796,30 @@
         });
       }
 
-      const okMatch = String(lastResponse || '').match(/^STATUS_OK:(.+)$/i);
-      const code = okMatch ? extractVerificationCode(okMatch[1]) : '';
-      if (code) return code;
+      const code = extractCodeFromStatusText(lastResponse);
+      if (code) {
+        if (!ignoredCodes.has(code)) {
+          return code;
+        }
+        if (!ignoredHistoricalCodeLogged) {
+          ignoredHistoricalCodeLogged = true;
+          await deps.addLog?.(
+            `步骤 8：SMSBower 复用订单 ${normalizedActivation.phoneNumber} 命中历史验证码，继续等待新短信。`,
+            'info'
+          );
+        }
+        if (typeof options.onWaitingForCode === 'function') {
+          await options.onWaitingForCode({
+            activation: normalizedActivation,
+            elapsedMs: Date.now() - start,
+            pollCount,
+            statusText: lastResponse,
+            timeoutMs,
+          });
+        }
+        await deps.sleepWithStop(intervalMs);
+        continue;
+      }
 
       const retryCodeMatch = String(lastResponse || '').match(/^STATUS_(?:WAIT_RETRY|WAIT_RESEND):(.+)$/i);
       const retryCode = retryCodeMatch ? extractVerificationCode(retryCodeMatch[1]) : '';
