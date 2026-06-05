@@ -16,31 +16,40 @@ function createHelpers(overrides = {}) {
   });
 }
 
-test('background flow reuses SMSBower-compatible providers on demand', async () => {
+test('background flow reuses SMSPool provider activations on demand', async () => {
   const calls = [];
   const helpers = createHelpers({
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, options = {}) => {
       const parsed = new URL(String(url));
-      const action = parsed.searchParams.get('action');
+      const body = new URLSearchParams(String(options.body || ''));
       calls.push({
-        action,
-        apiKey: parsed.searchParams.get('api_key'),
-        status: parsed.searchParams.get('status'),
+        path: parsed.pathname,
+        method: options.method || 'GET',
+        key: body.get('key'),
+        orderid: body.get('orderid'),
       });
-      if (action === 'getStatus') {
+      if (parsed.pathname === '/sms/activate') {
+        assert.equal(options.method, 'POST');
+        assert.equal(body.get('key'), 'pool-key');
+        assert.equal(body.get('orderid'), 'pool-1');
         return {
           ok: true,
-          text: async () => 'STATUS_OK:123456',
+          text: async () => JSON.stringify({ success: 1 }),
         };
       }
-      if (action === 'setStatus') {
-        assert.equal(parsed.searchParams.get('status'), '3');
+      if (parsed.pathname === '/sms/check') {
         return {
           ok: true,
-          text: async () => 'ACCESS_RETRY_GET',
+          text: async () => JSON.stringify({ success: 1 }),
         };
       }
-      throw new Error(`unexpected action: ${action}`);
+      if (parsed.pathname === '/request/active') {
+        return {
+          ok: true,
+          text: async () => '[]',
+        };
+      }
+      throw new Error(`unexpected SMSPool request: ${parsed.pathname}`);
     },
   });
 
@@ -63,8 +72,10 @@ test('background flow reuses SMSBower-compatible providers on demand', async () 
 
   assert.equal(activation.provider, 'smspool');
   assert.equal(activation.phoneNumber, '15551234567');
+  assert.ok(activation.smsPoolResendPreparedAt > 0);
   assert.deepEqual(calls, [
-    { action: 'getStatus', apiKey: 'pool-key', status: null },
-    { action: 'setStatus', apiKey: 'pool-key', status: '3' },
+    { path: '/sms/activate', method: 'POST', key: 'pool-key', orderid: 'pool-1' },
+    { path: '/sms/check', method: 'POST', key: 'pool-key', orderid: 'pool-1' },
+    { path: '/request/active', method: 'POST', key: 'pool-key', orderid: null },
   ]);
 });
